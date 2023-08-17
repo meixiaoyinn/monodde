@@ -1,3 +1,3 @@
 # monodde
-mindspore=2.0
-python=3.7
+mindspore=2.0alpha
+python=3.9.0
