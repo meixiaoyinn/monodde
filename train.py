@@ -1,8 +1,10 @@
-import time
-
-import mindspore as ms
-import mindspore.nn as nn
+# import time
+#
+# import mindspore as ms
+# import mindspore.nn as nn
 import mindspore.communication as comm
+from mindspore import amp
+from mindspore.amp import init_status, all_finite
 from config import cfg
 import datetime
 from tqdm import tqdm
@@ -18,7 +20,7 @@ from src.optimizer import *
 from src.eval_net import EvalWrapper
 
 
-ms.set_seed(1)
+# ms.set_seed(1)
 # numpy.random.seed(1)
 # random.seed(1)
 
@@ -26,13 +28,15 @@ ms.set_seed(1)
 def init_distribute():
     if cfg.is_distributed:
         comm.init()
-        config.rank = comm.get_rank()   #获取当前进程的排名
-        config.group_size = comm.get_group_size()  #获取当前通信组大小
-        config.local_rank=comm.get_local_rank()
+        cfg.rank = comm.get_rank()   #获取当前进程的排名
+        cfg.group_size = comm.get_group_size()  #获取当前通信组大小
+        cfg.local_rank=comm.get_local_rank()
         ms.set_auto_parallel_context(parallel_mode=ms.ParallelMode.DATA_PARALLEL, gradients_mean=True,
-                                     device_num=cfg.group_size)   #配置自动并行计算
+                                     device_num=cfg.group_size)   #配置自动并行计算  parameter_broadcast=True
+        cfg.SOLVER.IMS_PER_BATCH=cfg.SOLVER.IMS_PER_BATCH // cfg.group_size
     else:
         cfg.MODEL.USE_SYNC_BN = False
+    return cfg
 
 
 def setup(args):
@@ -53,7 +57,7 @@ def setup(args):
     cfg.MODEL.GRM_ATTRIBUTE = args.GRM_Attribute
     cfg.MODEL.GRM_UNCERN = args.GRM_Uncern
     cfg.MODEL.BACKBONE.CONV_BODY = args.backbone
-    cfg.MODEL.PRETRAIN=args.pretrained
+    cfg.MODEL.DEVICE=args.device
 
     if args.vis_thre > 0:
         cfg.TEST.VISUALIZE_THRESHOLD = args.vis_thre
@@ -65,6 +69,8 @@ def setup(args):
         cfg.DATASETS.TEST_SPLIT = 'test'
         cfg.DATASETS.TEST = ("kitti_test",)
     cfg.is_training=args.is_training
+    cfg.MODEL.PRETRAIN=args.pretrained
+    cfg.is_distributed = args.distributed
 
     if args.demo:
         cfg.DATASETS.TRAIN = ("kitti_demo",)
@@ -82,15 +88,108 @@ def setup(args):
     return cfg
 
 
+_grad_scale = ops.MultitypeFuncGraph("grad_scale")
+
+
+# class ClipGradients(nn.Cell):
+#     """
+#     Clip gradients.
+#     Inputs:
+#         grads (tuple[Tensor]): Gradients.
+#         clip_type (int): The way to clip, 0 for 'value', 1 for 'norm'.
+#         clip_value (float): Specifies how much to clip.
+#     Outputs:
+#         tuple[Tensor], clipped gradients.
+#     """
+#     def __init__(self):
+#         super(ClipGradients, self).__init__()
+#         self.clip_by_norm = nn.ClipByNorm()
+#         self.cast = ops.Cast()
+#         self.dtype = ops.DType()
+#
+#     def construct(self,grads,clip_type,clip_value):
+#         if clip_type != 0 and clip_type != 1:
+#             return grads
+#         new_grads = ()
+#         for grad in grads:
+#             dt = self.dtype(grad)
+#             if clip_type == 0:
+#                 t = ops.clip_by_value(grad, self.cast(ops.tuple_to_array((clip_value,)),dt))
+#             else:
+#                 t = self.clip_by_norm(grad, self.cast(ops.tuple_to_array((clip_value,)),dt))
+#                 new_grads = new_grads + (t,)
+#         return new_grads
+
+
+class TrainOneStepCell(nn.TrainOneStepWithLossScaleCell):
+    """
+    Network training package class.
+
+    Append an optimizer to the training network after that the construct function
+    can be called to create the backward graph.
+
+    Args:
+        network (Cell): The training network.
+        optimizer (Cell): Optimizer for updating the weights.
+        sens (Number): The adjust parameter. Default value is 1.0.
+        grad_clip (bool): Whether clip gradients. Default value is False.
+    """
+    def __init__(self, network, optimizer, scale_sense=1, grad_clip=False):
+        if isinstance(scale_sense, (int, float)):
+            scale_sense = ms.Tensor(scale_sense, ms.float32)
+        super(TrainOneStepCell, self).__init__(network, optimizer, scale_sense)
+        self.grad_clip = grad_clip
+        # self.clip_gradients = ClipGradients()
+
+
+    def construct(self, images, edge_infor, targets_heatmap, targets_variables,iteration):
+        weights = self.weights
+        # wmean=0
+        # for i in weights:
+        #     if ops.isnan(i.mean()):
+        #         print(i)
+        #     wmean+=i.mean()
+        # print('weights',wmean/len(weights))
+
+        loss = self.network(images, edge_infor, targets_heatmap, targets_variables,iteration)
+        scaling_sens = self.scale_sense
+
+        _, scaling_sens = self.start_overflow_check(loss, scaling_sens)
+
+        scaling_sens_filled = ops.ones_like(loss) * ops.cast(scaling_sens, ops.dtype(loss))
+        grads = self.grad(self.network, weights)(images, edge_infor, targets_heatmap, targets_variables,iteration, scaling_sens_filled)
+
+
+        if loss < 10000:
+            # for i in grads:
+            #     print(i)
+            #     if ops.isnan(i.mean()):
+            #         print('have nan')
+            # status = init_status()
+            # is_finite = all_finite(grads, status)
+
+            # if is_finite:
+            # grads = self.hyper_map(ops.partial(_grad_scale, scaling_sens), grads)
+            # apply grad reducer on grads
+            # grads = self.grad_reducer(grads)
+            # if self.grad_clip:
+                # grads = self.clip_gradients(grads, GRADIENT_CLIP_TYPE, GRADIENT_CLIP_VALUE)
+                # grads = ops.clip_by_global_norm(grads)
+            loss = ops.depend(loss, self.optimizer(grads))
+        return loss
+
+
 def train_preprocess():
     cfg=setup(config)
     if cfg.MODEL.DEVICE=='Ascend':
         device_id = get_device_id()
-        ms.set_context(mode=ms.GRAPH_MODE, device_target=cfg.MODEL.DEVICE, device_id=device_id)
+        ms.set_context(mode=ms.PYNATIVE_MODE, device_target=cfg.MODEL.DEVICE, device_id=device_id,pynative_synchronize=True,save_graphs=True,
+                       save_graphs_path='output/graph')  #pynative_synchronize=True,save_graphs=True
     else:
         ms.context.set_context(mode=ms.PYNATIVE_MODE, device_target=cfg.MODEL.DEVICE, device_id=0)
     device=ms.get_context("device_target")
-    init_distribute()  # init distributed
+    cfg=init_distribute()  # init distributed
+    return cfg
 
 
 def load_parameters(val_network, train_network):
@@ -108,19 +207,18 @@ def load_parameters(val_network, train_network):
 
 
 def get_val_dataset(cfg,is_train=False):
-    cfg.is_training=is_train
-    datasets=create_kitti_dataset(cfg)
+    datasets=create_kitti_dataset(cfg,is_train)
     return datasets
 
 
 # @moxing_wrapper(pre_process=modelarts_pre_process, post_process=modelarts_post_process, pre_args=[config])
 def train():
-    train_preprocess()
-    dataset=create_kitti_dataset(cfg)
+    cfg=train_preprocess()
+    dataset=create_kitti_dataset(cfg,cfg.is_training)
     steps_per_epoch = dataset.get_dataset_size()
     data_loader = dataset.create_tuple_iterator(do_copy=False)
 
-    total_iters_each_epoch = len(data_loader.dataset) // cfg.SOLVER.IMS_PER_BATCH
+    total_iters_each_epoch = data_loader.dataset.dataset_size // cfg.SOLVER.IMS_PER_BATCH
     # use epoch rather than iterations for saving checkpoint and validation
     if cfg.SOLVER.EVAL_AND_SAVE_EPOCH:
         cfg.SOLVER.MAX_ITERATION = cfg.SOLVER.MAX_EPOCHS * total_iters_each_epoch
@@ -133,10 +231,12 @@ def train():
     meters = MetricLogger(delimiter=" ",)
 
     network = Mono_net(cfg)
-    val_network = Mono_net(cfg)
+    # network=amp.auto_mixed_precision(network, "O2")
+    #val_network = Mono_net(cfg)
     network = MonoddeWithLossCell(network,cfg)
     opt=get_optim(cfg,network,steps_per_epoch)
-    network = nn.TrainOneStepCell(network, opt)
+    # network = nn.TrainOneStepCell(network, opt,sens=2)
+    network=TrainOneStepCell(network, opt, scale_sense=cfg.SOLVER.loss_scale,grad_clip=True)
 
     network.set_train()
     logger = logging.getLogger("monoflex.trainer")
@@ -146,8 +246,8 @@ def train():
     end = time.time()
     ckpt_queue = deque()
 
-    ds_val = get_val_dataset(cfg)
-    eval_wrapper = EvalWrapper(cfg, val_network,ds_val)
+    # ds_val = get_val_dataset(cfg)
+    # eval_wrapper = EvalWrapper(cfg, val_network,ds_val)
 
     default_depth_method = cfg.MODEL.HEAD.OUTPUT_DEPTH
     if cfg.local_rank == 0:
@@ -159,15 +259,19 @@ def train():
 
     iter_per_epoch=cfg.SOLVER.IMS_PER_BATCH
 
-    # for iteration in range(0, max_iter):
+    summary_collect_frequency = 1
+
+    # with ms.SummaryRecord('./summary_dir/summary_04', network=network) as summary_record:
     for data, iteration in tqdm(zip(data_loader,range(0, max_iter))):
         data_time = time.time() - end
-        loss = network(data, iteration)
+        images, edge_infor, targets_heatmap, targets_variables = prepare_targets(data,cfg)
+        loss = network(images, edge_infor, targets_heatmap, targets_variables,iteration)
         meters.update(loss=loss.asnumpy())
         batch_time = time.time() - end
         end = time.time()
         meters.update(time=batch_time, data=data_time)
         print(loss)
+        # else:continue
 
         eta_seconds = meters.time.global_avg * (max_iter - iteration)
         eta_string = str(datetime.timedelta(seconds=int(eta_seconds)))
@@ -215,9 +319,9 @@ def train():
             if cfg.OUTPUT_DIR:
                 output_folder = os.path.join(cfg.OUTPUT_DIR, dataset_name, "inference_{}".format(iteration))
                 os.makedirs(output_folder, exist_ok=True)
-            load_parameters(val_network, train_network=network)
+            #load_parameters(val_network, train_network=network)
             # result_dict, result_str, dis_ious  = eval_wrapper.inference(cur_epoch=iteration + 1, cur_step=1)
-            result_dict, dis_ious = eval_wrapper.inference(iteration)
+            #result_dict, dis_ious = eval_wrapper.inference(iteration)
 
             if comm.get_local_rank() == 0:
                 # only record more accurate R40 results

@@ -1,6 +1,7 @@
 # Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved.
-import csv
+# import csv
 import os
+# import pdb
 from collections import defaultdict
 from collections import deque
 
@@ -9,6 +10,174 @@ import numpy as np
 from mindspore import Tensor, ops, nn
 import mindspore as ms
 from shapely import Polygon
+
+
+def rad_to_matrix(rotys, N):
+    # device = rotys.device
+
+    cos, sin = ops.cos(rotys), ops.sin(rotys)
+
+    i_temp = ops.Tensor([[1, 0, 1],
+                         [0, 1, 0],
+                         [-1, 0, 1]], dtype=ms.float32)
+
+    ry = i_temp.tile((N, 1)).view(N, -1, 3)
+
+    ry[:, 0, 0] *= cos
+    ry[:, 0, 2] *= sin
+    ry[:, 2, 0] *= sin
+    ry[:, 2, 2] *= cos
+
+    return ry
+
+
+def encode_box3d(rotys, dims, locs):
+    '''
+    construct 3d bounding box for each object.
+    Args:
+            rotys: rotation in shape N
+            dims: dimensions of objects
+            locs: locations of objects
+
+    Returns:
+
+    '''
+    if len(rotys.shape) == 2:
+        rotys = rotys.flatten()
+    if len(dims.shape) == 3:
+        dims = dims.view(-1, 3)
+    if len(locs.shape) == 3:
+        locs = locs.view(-1, 3)
+
+    # device = rotys.device
+    N = rotys.shape[0]
+    ry = rad_to_matrix(rotys, N)
+
+    # l, h, w
+    dims_corners = ops.tile(dims.view((-1, 1)),(1, 8))
+    dims_corners = dims_corners * 0.5
+    dims_corners[:, 4:] = -dims_corners[:, 4:]
+    index = ms.Tensor([[4, 5, 0, 1, 6, 7, 2, 3],
+                        [0, 1, 2, 3, 4, 5, 6, 7],
+                        [4, 0, 1, 5, 6, 2, 3, 7]], ms.int32).tile((N, 1))
+
+    box_3d_object = ops.gather_elements(dims_corners, 1, index)
+    b = box_3d_object.view((N, 3, -1))
+    box_3d = ops.matmul(ry, b)  # ry:[11,3,3]   box_3d_object:[11,3,8]
+    box_3d += ops.expand_dims(locs, -1).tile((1, 1, 8))
+
+    return ops.transpose(box_3d, (0, 2, 1))
+
+def project_image_to_rect(uv_depth,calib_dict):
+    """ Input: nx3 first two channels are uv, 3rd channel
+               is depth in rect camera coord.
+        Output: nx3 points in rect camera coord.
+    """
+    n = uv_depth.shape[0]
+    x = ((uv_depth[:, 0] - calib_dict['c_u']) * uv_depth[:, 2]) / calib_dict['f_u'] + calib_dict['b_x']
+    y = ((uv_depth[:, 1] - calib_dict['c_u']) * uv_depth[:, 2]) / calib_dict['f_v'] + calib_dict['b_y']
+
+    if isinstance(uv_depth, np.ndarray):
+        pts_3d_rect = np.zeros((n, 3))
+    else:
+        pts_3d_rect = ops.zeros(uv_depth.shape,ms.float32)
+
+    pts_3d_rect[:, 0] = x
+    pts_3d_rect[:, 1] = y
+    pts_3d_rect[:, 2] = uv_depth[:, 2]
+
+    return pts_3d_rect
+def decode_location_flatten(points, offsets, depths, calibs, pad_size, batch_idxs,down_ratio):
+    batch_size = len(calibs)
+    gts = ops.unique(batch_idxs)[0]
+    locations = ops.zeros((points.shape[0], 3), ms.float32)
+    points = (points + offsets) * down_ratio - pad_size[batch_idxs]  # Left points: The 3D centers in original images.
+
+    for idx, gt in enumerate(gts):
+        corr_pts_idx = ops.nonzero(batch_idxs == gt).squeeze(-1)
+        calib = calibs[gt]
+        # concatenate uv with depth
+        corr_pts_depth = ops.concat((points[corr_pts_idx], depths[corr_pts_idx, None]),1)
+        # locations = ops.tensor_scatter_add(locations, corr_pts_idx, corr_pts_depth)
+        locations[corr_pts_idx] = project_image_to_rect(corr_pts_depth, calib)
+    return locations
+
+
+def prepare_targets(data,cfg):
+    # print('prepare_targets')
+    per_batch=cfg.SOLVER.IMS_PER_BATCH
+    down_ratio = cfg.MODEL.BACKBONE.DOWN_RATIO
+    corner_loss_depth = cfg.MODEL.HEAD.CORNER_LOSS_DEPTH
+    edge_infor = [data[-3], data[-2]]
+    calibs = []
+    for i in range(per_batch):
+        calibs.append(
+            dict(P=data[22][i, :, :], R0=data[23][i, :, :], C2V=data[24][i, :, :], c_u=data[25][i], c_v=data[26][i],
+                 f_u=data[27][i],
+                 f_v=data[28][i], b_x=data[29][i], b_y=data[30][i]))
+    reg_mask = ops.cast(data[9], ms.bool_)
+    ori_imgs = ops.cast(data[14], ms.int32)
+    trunc_mask = ops.cast(data[16], ms.int32)
+    flatten_reg_mask_gt = reg_mask.view(-1).asnumpy().tolist()  # flatten_reg_mask_gt shape: (B * num_objs)
+
+    # the corresponding image_index for each object, used for finding pad_size, calib and so on
+    batch_idxs = ops.arange(per_batch,dtype=ms.int32).view(-1,1).expand_as(reg_mask).reshape(-1) # batch_idxs shape: (B * num_objs)
+    batch_idxs = batch_idxs[flatten_reg_mask_gt]  # Only reserve the features of valid objects.
+    valid_targets_bbox_points = data[4].view(-1, 2)[flatten_reg_mask_gt]  # valid_targets_bbox_points shape: (valid_objs, 2)
+
+    # fcos-style targets for 2D
+    target_bboxes_2D = data[12].view(-1, 4)[flatten_reg_mask_gt]  # target_bboxes_2D shape: (valid_objs, 4). 4 -> (x1, y1, x2, y2)
+    target_bboxes_height = target_bboxes_2D[:, 3] - target_bboxes_2D[:, 1]  # target_bboxes_height shape: (valid_objs,)
+    target_bboxes_width = target_bboxes_2D[:, 2] - target_bboxes_2D[:, 0]  # target_bboxes_width shape: (valid_objs,)
+
+    target_regression_2D = ops.concat((valid_targets_bbox_points - target_bboxes_2D[:, :2], target_bboxes_2D[:,2:] - valid_targets_bbox_points),axis=1)  # offset to 2D bbox boundaries.
+    mask_regression_2D = ops.logical_and(target_bboxes_height > 0,target_bboxes_width > 0)
+    mask_regression_2D=mask_regression_2D.asnumpy().tolist()
+    target_regression_2D = target_regression_2D[mask_regression_2D]  # target_regression_2D shape: (valid_objs, 4)
+
+    # targets for 3D
+    target_clses = data[3].view(-1)[flatten_reg_mask_gt]  # target_clses shape: (val_objs,)
+    target_depths_3D = data[8][..., -1].view(-1)[flatten_reg_mask_gt]  # target_depths_3D shape: (val_objs,)
+    target_rotys_3D = data[15].view(-1)[flatten_reg_mask_gt]  # target_rotys_3D shape: (val_objs,)
+    target_alphas_3D = data[17].view(-1)[flatten_reg_mask_gt]  # target_alphas_3D shape: (val_objs,)
+    target_offset_3D = data[11].view(-1, 2)[flatten_reg_mask_gt]  # The offset from target centers to projected 3D centers. target_offset_3D shape: (val_objs, 2)
+    target_dimensions_3D = data[7].view(-1, 3)[flatten_reg_mask_gt]  # target_dimensions_3D shape: (val_objs, 3)
+
+    target_orientation_3D = data[18].view(-1, data[18].shape[-1])[flatten_reg_mask_gt]  # target_orientation_3D shape: (num_objs, 8)
+    target_locations_3D = decode_location_flatten(valid_targets_bbox_points, target_offset_3D,
+                                          target_depths_3D,calibs,data[13],batch_idxs,down_ratio)  # target_locations_3D shape: (valid_objs, 3)
+    target_corners_3D = encode_box3d(target_rotys_3D, target_dimensions_3D, target_locations_3D)  # target_corners_3D shape: (valid_objs, 8, 3)
+    target_bboxes_3D = ops.concat((target_locations_3D, target_dimensions_3D, target_rotys_3D[:, None]),axis=1)  # target_bboxes_3D shape: (valid_objs, 7)
+
+    target_trunc_mask = trunc_mask.view(-1)[flatten_reg_mask_gt]  # target_trunc_mask shape(valid_objs,)
+    obj_weights = data[10].view(-1)[flatten_reg_mask_gt]  # obj_weights shape: (valid_objs,)
+    target_corner_keypoints = data[5].view(len(flatten_reg_mask_gt), -1, 3)[flatten_reg_mask_gt]  # target_corner_keypoints shape: (val_objs, 10, 3)
+    target_corner_depth_mask = data[6].view(-1, 3)[flatten_reg_mask_gt]
+
+    keypoints_visible = data[21].view(-1, data[21].shape[-1])[flatten_reg_mask_gt]  # keypoints_visible shape: (valid_objs, 11)
+    if corner_loss_depth == 'GRM':
+        keypoints_visible = ops.tile(ops.expand_dims(keypoints_visible, 2), (1, 1, 2)).reshape((keypoints_visible.shape[0], -1))  # The effectness of first 22 GRM equations.
+        GRM_valid_items = ops.concat((keypoints_visible, ops.ones((keypoints_visible.shape[0], 3), ms.bool_)),axis=1)  # GRM_valid_items shape: (valid_objs, 25)
+    elif corner_loss_depth == 'soft_GRM':
+        keypoints_visible = ops.tile(ops.expand_dims(keypoints_visible[:, 0:8], 2), (1, 1, 2)).reshape((keypoints_visible.shape[0], -1))  # The effectiveness of the first 16 equations. shape: (valid_objs, 16)
+        direct_depth_visible = ops.ones((keypoints_visible.shape[0], 1), ms.bool_)
+        veritical_group_visible = ops.cast(data[6].view(-1, 3)[flatten_reg_mask_gt],ms.bool_)  # veritical_group_visible shape: (valid_objs, 3)
+        GRM_valid_items = ops.concat((ops.cast(keypoints_visible,ms.bool_), direct_depth_visible, veritical_group_visible),axis=1)  # GRM_valid_items shape: (val_objs, 20)
+    else:
+        GRM_valid_items = None
+        # preparing outputs
+    return_dict = {'cls_ids':data[3],'pad_size':data[13],'target_centers':data[4],'calib':calibs,'reg_2D': target_regression_2D, 'offset_3D': target_offset_3D, 'depth_3D': target_depths_3D,
+               'orien_3D': target_orientation_3D,'valid_targets_bbox_points':valid_targets_bbox_points,
+               'dims_3D': target_dimensions_3D, 'corners_3D': target_corners_3D, 'width_2D': target_bboxes_width,
+               'rotys_3D': target_rotys_3D,'target_clses':target_clses,
+               'cat_3D': target_bboxes_3D, 'trunc_mask_3D': target_trunc_mask, 'height_2D': target_bboxes_height,
+               'GRM_valid_items': GRM_valid_items.asnumpy().tolist(),'target_corner_depth_mask':target_corner_depth_mask,
+               'locations': target_locations_3D,'obj_weights':obj_weights,'target_corner_keypoints':target_corner_keypoints,'mask_regression_2D':mask_regression_2D,
+                   'flatten_reg_mask_gt':flatten_reg_mask_gt,'batch_idxs':batch_idxs,'keypoints':data[5],'keypoints_depth_mask':data[6],
+                   'ori_imgs':ori_imgs
+               }
+
+    return data[0], edge_infor, data[19], return_dict
 
 
 class SmoothedValue():
@@ -108,6 +277,57 @@ def nms_hm(heat_map, kernel=3, reso=1):
     return heat_map * eq_index
 
 
+# def get_iou_3d(pred_corners, target_corners):
+#     """
+#     :param corners3d: (N, 8, 3) in rect coords
+#     :param query_corners3d: (N, 8, 3)
+#     :return: IoU
+#     """
+#     min = ops.Minimum()
+#     max = ops.Maximum()
+#     zeros=ops.Zeros()
+#
+#     A, B = pred_corners, target_corners
+#     N = A.shape[0]
+#
+#     # init output
+#     iou3d = zeros((N,),ms.float32)
+#
+#     # for height overlap, since y face down, use the negative y
+#     min_h_a = - A[:, 0:4, 1].sum(axis=1) / 4.0
+#     max_h_a = - A[:, 4:8, 1].sum(axis=1) / 4.0
+#     min_h_b = - B[:, 0:4, 1].sum(axis=1) / 4.0
+#     max_h_b = - B[:, 4:8, 1].sum(axis=1) / 4.0
+#
+#     # overlap in height
+#     h_max_of_min = max(min_h_a, min_h_b)
+#     h_min_of_max = min(max_h_a, max_h_b)
+#     h_overlap = max(zeros(h_min_of_max.shape,ms.float32),h_min_of_max - h_max_of_min)
+#
+#     # x-z plane overlap
+#     A=A.asnumpy()
+#     B=B.asnumpy()
+#     for i in range(N):
+#         if flatten_reg_mask_gt[i]==False:continue
+#         # pdb.set_trace()
+#         # print(A[i][0:4, [0, 2]])
+#         # print(B[i][0:4, [0, 2]])
+#         bottom_a, bottom_b =  Polygon(A[i][ 0:4, [0, 2]]), Polygon(B[i][ 0:4, [0, 2]])
+#         if bottom_a.is_valid and bottom_b.is_valid:
+#             # check is valid,  A valid Polygon may not possess any overlapping exterior or interior rings.
+#             bottom_overlap = bottom_a.intersection(bottom_b)
+#             bottom_overlap=bottom_overlap.area
+#         else:
+#             bottom_overlap =0
+#
+#         overlap3d = bottom_overlap * h_overlap[i]
+#         union3d = bottom_a.area * (max_h_a[i] - min_h_a[i]) + bottom_b.area  * (max_h_b[i] - min_h_b[i]) - overlap3d
+#
+#         iou3d[i] = overlap3d / union3d
+#
+#     return iou3d
+
+
 def get_iou_3d(pred_corners, target_corners):
     """
     :param corners3d: (N, 8, 3) in rect coords
@@ -136,8 +356,10 @@ def get_iou_3d(pred_corners, target_corners):
     h_overlap = max(zeros(h_min_of_max.shape,ms.float32),h_min_of_max - h_max_of_min)
 
     # x-z plane overlap
+    A=A.asnumpy()
+    B=B.asnumpy()
     for i in range(N):
-        bottom_a, bottom_b =  Polygon(ops.transpose(A[i, 0:4, [0, 2]],(1,0))), Polygon(ops.transpose(B[i, 0:4, [0, 2]],(1,0)))
+        bottom_a, bottom_b =  Polygon(A[i][0:4, [0, 2]]), Polygon(B[i][0:4, [0, 2]])
         if bottom_a.is_valid and bottom_b.is_valid:
             # check is valid,  A valid Polygon may not possess any overlapping exterior or interior rings.
             bottom_overlap = bottom_a.intersection(bottom_b)
@@ -164,12 +386,13 @@ def select_topk(heat_map, K=100):
 
     '''
     batch, cls, height, width = heat_map.shape
+    topk=ops.TopK()
 
     # First select topk scores in all classes and batchs
     # [N, C, H, W] -----> [N, C, H*W]
     heat_map = heat_map.view(batch, cls, -1)
     # Both in [N, C, K]
-    topk_scores_all, topk_inds_all = ops.topk(heat_map, K)
+    topk_scores_all, topk_inds_all = topk(heat_map, K)[0]
 
     # topk_inds_all = topk_inds_all % (height * width) # todo: this seems redudant
     topk_ys = ops.cast(topk_inds_all / width,ms.float32)
@@ -182,7 +405,7 @@ def select_topk(heat_map, K=100):
     # [N, C, K] -----> [N, C*K]
     topk_scores_all = topk_scores_all.view(batch, -1)
     # Both in [N, K]
-    topk_scores, topk_inds = ops.topk(topk_scores_all, K)
+    topk_scores, topk_inds = topk(topk_scores_all, K)[0]
     topk_clses = ops.cast(topk_inds / K,ms.float32)
 
     # assert isinstance(topk_clses, ops.cuda.FloatTensor)
@@ -300,9 +523,9 @@ def uncertainty_guided_prune(separate_depths, GRM_uncern, cfg, depth_range=None,
         obj_uncerns = GRM_uncern[obj_id]
         # Filter the depth estimations out of possible range.
         if depth_range != None:
-            valid_depth_mask = (obj_depths > depth_range[0]) & (obj_depths < depth_range[1])
-            obj_depths = obj_depths[valid_depth_mask]
-            obj_uncerns = obj_uncerns[valid_depth_mask]
+            valid_depth_mask = ops.logical_and((obj_depths > depth_range[0]) , (obj_depths < depth_range[1]))
+            obj_depths = ops.masked_select(obj_depths,valid_depth_mask)
+            obj_uncerns = ops.masked_select(obj_uncerns,valid_depth_mask)
         # If all objects are filtered.
         if obj_depths.shape[0] == 0:
             objs_depth_list.append(ops.expand_dims(separate_depths[obj_id].mean(),0))
@@ -339,8 +562,8 @@ def uncertainty_guided_prune(separate_depths, GRM_uncern, cfg, depth_range=None,
                 obj_depth_sigma = ops.sqrt((considered_w * considered_uncern).sum())
                 flag = True
 
-    pred_depths = ops.cat(objs_depth_list, axis=0)
-    pred_uncerns = ops.cat(objs_uncern_list, axis=0)
+    pred_depths = ops.concat(objs_depth_list, axis=0)
+    pred_uncerns = ops.concat(objs_uncern_list, axis=0)
     return pred_depths, pred_uncerns
 
 
@@ -373,8 +596,8 @@ def error_from_uncertainty(uncern):
     if uncern.ndim != 2:
         raise Exception("uncern must be a 2-dim tensor.")
     weights = 1 / uncern	# weights shape: (total_num_objs, 20)
-    weights = weights / ops.sum(weights, dim = 1, keepdim = True)
-    error = ops.sum(weights * uncern, dim = 1)	# error shape: (valid_objs,)
+    weights = weights / ops.ReduceSum(True)(weights, 1)
+    error = ops.ReduceSum()(weights * uncern, 1)	# error shape: (valid_objs,)
     return error
 
 
@@ -390,7 +613,7 @@ def nms_3d(results, bboxes, scores, iou_threshold = 0.2):
     Output:
         preserved_results: results after NMS.
     '''
-    descend_index = ops.flip(ops.argsort(scores, axis = 0), dims = (0,))
+    descend_index = ops.flip(ops.Sort(axis=0)(scores), dims = (0,))
     results = results[descend_index, :]
     sorted_bboxes = bboxes[descend_index, :, :]
 

@@ -11,24 +11,24 @@ import mindspore.common.dtype as mstype
 
 # from ..utils import ClipByValue
 
-class ClipByValue(nn.Cell):
-    """
-    Clip tensor by value
-
-    Args: None
-
-    Returns:
-        Tensor, output after clip.
-    """
-    def __init__(self):
-        super(ClipByValue, self).__init__()
-        self.min = ops.Minimum()
-        self.max = ops.Maximum()
-
-    def construct(self, x, clip_value_min, clip_value_max):
-        x_min = self.min(x, clip_value_max)
-        x_max = self.max(x_min, clip_value_min)
-        return x_max
+# class ClipByValue(nn.Cell):
+#     """
+#     Clip tensor by value
+#
+#     Args: None
+#
+#     Returns:
+#         Tensor, output after clip.
+#     """
+#     def __init__(self):
+#         super(ClipByValue, self).__init__()
+#         self.min = ops.Minimum()
+#         self.max = ops.Maximum()
+#
+#     def construct(self, x, clip_value_min, clip_value_max):
+#         x_min = self.min(x, clip_value_max)
+#         x_max = self.max(x_min, clip_value_min)
+#         return x_max
 
 
 
@@ -45,8 +45,8 @@ class GetOffsetPosition(nn.Cell):
     """
     def __init__(self, begin, stride):
         super(GetOffsetPosition, self).__init__()
-        self.begin = ms.Tensor(begin,ms.int32)
-        self.stride = ms.Tensor(stride,ms.int32)
+        self.begin = begin
+        self.stride = stride
         self.meshgrid = ops.Meshgrid()
         self.shape = ops.Shape()
         self.reshape = ops.Reshape()
@@ -54,23 +54,23 @@ class GetOffsetPosition(nn.Cell):
         self.cat_a1 = ops.Concat(axis=1)
         self.tile = ops.Tile()
         self.dtype = ops.DType()
-        self.range = ops.range(-self.begin, self.begin + 1,ms.Tensor(1,ms.int32))
-        self.cast = ops.Cast()
+        self.range = nn.Range(-self.begin, self.begin + 1)
+        # self.cast = ops.Cast()
 
     def construct(self, offset):
         """get target position"""
         offset_shape = self.shape(offset) # b * 2N * h * w
         N, h, w = offset_shape[1] // 2, offset_shape[2], offset_shape[3]
         # get p_n
-        range_pn = self.range
+        range_pn = self.range()
         p_n_x, p_n_y = self.meshgrid((range_pn, range_pn))
         # (2N, 1)
         p_n = self.cat_a0((self.reshape(p_n_x, (N, 1)), self.reshape(p_n_y, (N, 1))))
         p_n = self.reshape(p_n, (1, 2 * N, 1, 1))
 
         # get p_0
-        range_h = ops.range(self.begin, h*self.stride + 1, self.stride)
-        range_w = ops.range(self.begin, w*self.stride + 1, self.stride)
+        range_h = nn.Range(self.begin, h*self.stride + 1, self.stride)()
+        range_w = nn.Range(self.begin, w*self.stride + 1, self.stride)()
         p_0_x, p_0_y = self.meshgrid((range_h, range_w))
         p_0_x = self.reshape(p_0_x, (1, 1, h, w))
         p_0_x = self.tile(p_0_x, (1, N, 1, 1))
@@ -118,7 +118,7 @@ class GetSurroundFeature(nn.Cell):
         # (b * hwN)
         q = q_h * w_p + q_w
         q = self.reshape(q, (-1, 1))
-        ind_b =ops.range(ms.Tensor(0,ms.int32), ms.Tensor(b,ms.int32), ms.Tensor(1,ms.int32))
+        ind_b = nn.Range(0, b, 1)()
         ind_b = self.reshape(ind_b, (-1, 1))
         ind_b = self.tile(ind_b, (1, hwn))
         ind_b = self.reshape(ind_b, (-1, 1))
@@ -202,9 +202,9 @@ class DeformConv2d(nn.Cell):
         self.transpose = ops.Transpose()
         self.floor = ops.Floor()
         self.half = ops.Split(axis=-1, output_num=2)
-        self.expand_dims = ops.ExpandDims()
+        # self.clip_value = ClipByValue()
+        # self.expand_dims = ops.ExpandDims()
         self.shape = ops.Shape()
-        self.cast = ops.Cast()
         self._get_offset = GetOffsetPosition(self.begin, self.stride)
         self._get_surround = GetSurroundFeature()
         self._generate_fm = RegenerateFeatureMap(self.kernel_size)
@@ -223,23 +223,23 @@ class DeformConv2d(nn.Cell):
 
         # (b, h, w, 2N)
         p = self.transpose(p, self.perm_list)
-        q_lt = self.cast(self.floor(p), mstype.int32)
+        q_lt = ops.cast(self.floor(p), mstype.int32)
         q_rb = q_lt + 1
 
         # (b, h, w, N)
         q_lt_h, q_lt_w = self.half(q_lt)
-        q_lt_h = ops.clamp(q_lt_h, 0, x_shape[2] - 1)
-        q_lt_w = ops.clamp(q_lt_w, 0, x_shape[3] - 1)
+        q_lt_h = ops.clip_by_value(q_lt_h, ms.Tensor(0,q_lt_h.dtype), ms.Tensor(x_shape[2] - 1,q_lt_h.dtype))
+        q_lt_w = ops.clip_by_value(q_lt_w, ms.Tensor(0,q_lt_h.dtype), ms.Tensor(x_shape[3] - 1,q_lt_w.dtype))
         # (b, h, w, N)
         q_rb_h, q_rb_w = self.half(q_rb)
-        q_rb_h = ops.clamp(q_rb_h, 0, x_shape[2] - 1)
-        q_rb_w = ops.clamp(q_rb_w, 0, x_shape[3] - 1)
+        q_rb_h = ops.clip_by_value(q_rb_h, ms.Tensor(0,q_rb_h.dtype), ms.Tensor(x_shape[2] - 1,q_rb_h.dtype))
+        q_rb_w = ops.clip_by_value(q_rb_w, ms.Tensor(0,q_rb_w.dtype), ms.Tensor(x_shape[3] - 1,q_rb_w.dtype))
 
         # clip p
         p_h, p_w = self.half(p)
         dtype = self.dtype(offset)
-        p_h = ops.clamp(p_h, self.cast(0, dtype), self.cast(x_shape[2] - 1, dtype))
-        p_w = ops.clamp(p_w, self.cast(0, dtype), self.cast(x_shape[3] - 1, dtype))
+        p_h = ops.clip_by_value(p_h, ms.Tensor(0, dtype), ms.Tensor(x_shape[2] - 1, dtype))
+        p_w = ops.clip_by_value(p_w, ms.Tensor(0, dtype), ms.Tensor(x_shape[3] - 1, dtype))
 
         # bilinear kernel (b, h, w, N)
         g_lt = (1 + (q_lt_h - p_h)) * (1 + (q_lt_w - p_w))
@@ -254,23 +254,22 @@ class DeformConv2d(nn.Cell):
         x_q_rt = self._get_surround(x, q_rb_h, q_lt_w)
 
         # (b, c, h, w, N)
-        x_offset = (self.expand_dims(g_lt, 1) * x_q_lt +
-                    self.expand_dims(g_rb, 1) * x_q_rb +
-                    self.expand_dims(g_lb, 1) * x_q_lb +
-                    self.expand_dims(g_rt, 1) * x_q_rt)
+        x_offset = (ops.expand_dims(g_lt, 1) * x_q_lt +
+                    ops.expand_dims(g_rb, 1) * x_q_rb +
+                    ops.expand_dims(g_lb, 1) * x_q_lb +
+                    ops.expand_dims(g_rt, 1) * x_q_rt)
 
         if self.modulation:
             # modulation (b, 1, h, w, N)
             m = self.sigmoid(self.m_conv(x))
             m = self.transpose(m, self.perm_list)
-            m = self.expand_dims(m, 1)
+            m = ops.expand_dims(m, 1)
             x_offset = x_offset * m
 
         x_offset = self._generate_fm(x_offset)
         out = self.conv(x_offset)
 
         return out
-
 # test
 if __name__ == '__main__':
     x = mindspore.Tensor(np.random.randint(0, 255, (3, 3), int), mindspore.float32)

@@ -3,11 +3,13 @@ import numpy as np
 
 from config import TYPE_ID_CONVERSION
 import mindspore.dataset as ds
+from mindspore.dataset.vision import ConvertColor,Normalize
 
 from model_utils.kitti_utils import *
 from .distributed_sampler import DistributedSampler
-from .transformers import *
+# from .transformers import *
 from .augmentations import get_composed_augmentations
+import cv2
 
 
 
@@ -139,8 +141,9 @@ class KittiDataset:
 
         ret_img[pad_y: pad_y + h, pad_x: pad_x + w] = img
         pad_size = np.array([pad_x, pad_y])
+        ret_img=ret_img /255
 
-        return Image.fromarray(ret_img.astype(np.uint8)), pad_size
+        return ret_img, pad_size
 
     def get_edge_utils(self, image_size, pad_size, down_ratio=4):
         img_w, img_h = image_size
@@ -279,15 +282,15 @@ class KittiDataset:
 
         if self.split == 'test':
             # for inference we parametrize with original size
-            target={'image_size':img.size,'is_train':self.is_train}
-            # target = ParamsList(image_size=img.size, is_train=self.is_train)
-            target["pad_size"]=pad_size
-            target["calib"]=calib
-            target["ori_img"]=ori_img
+            # target={'image_size':img.size,'is_train':self.is_train}
+            # # target = ParamsList(image_size=img.size, is_train=self.is_train)
+            # target["pad_size"]=pad_size
+            # target["calib"]=calib
+            # target["ori_img"]=ori_img
             # if self.transforms is not None: img, target = self.transforms(img, target)
 
-            return img,img.size,self.is_train, pad_size, calib['P'],calib['R0'],calib['C2V'],calib['c_u'], calib['c_v'],\
-               calib['f_u'],calib['f_v'],calib['b_x'],calib['b_y'],input_edge_count,input_edge_indices
+            return img,img.size,self.is_train.astype(np.int32), pad_size, calib['P'],calib['R0'],calib['C2V'],calib['c_u'], calib['c_v'],\
+               calib['f_u'],calib['f_v'],calib['b_x'],calib['b_y'],ori_img,input_edge_count,input_edge_indices,original_idx
 
         # heatmap
         heat_map = np.zeros([self.num_classes, self.output_height, self.output_width], dtype=np.float32)
@@ -475,8 +478,7 @@ class KittiDataset:
                 if pred_2D: bboxes[i] = box2d
 
                 # local coordinates for keypoints
-                keypoints[i] = np.concatenate(
-                    (keypoints_2D - target_center.reshape(1, -1), keypoints_visible[:, np.newaxis]), axis=1)
+                keypoints[i] = np.concatenate((keypoints_2D - target_center.reshape(1, -1), keypoints_visible[:, np.newaxis]), axis=1)
                 keypoints_depth_mask[i] = keypoints_depth_valid
 
                 dimensions[i] = np.array([obj.l, obj.h, obj.w])
@@ -492,12 +494,12 @@ class KittiDataset:
                 occlusions[i] = float_occlusion
                 truncations[i] = float_truncation
                 GRM_keypoints_visible[i] = GRM_keypoint_visible
-        return img,img.size,self.is_train, cls_ids,target_centers, keypoints, keypoints_depth_mask,\
-               dimensions, locations, reg_mask, reg_weight,\
-               offset_3D, bboxes, pad_size, ori_img, rotys, trunc_mask,\
+        return img,img.size,self.is_train.astype(np.int32), cls_ids,target_centers, keypoints, keypoints_depth_mask,\
+               dimensions, locations, reg_mask.astype(np.int32), reg_weight,\
+               offset_3D, bboxes, pad_size.astype(np.int32), ori_img, rotys, trunc_mask,\
                alphas, orientations, heat_map, gt_bboxes,  \
-               GRM_keypoints_visible, calib['P'],calib['R0'],calib['C2V'],calib['c_u'], calib['c_v'],\
-               calib['f_u'],calib['f_v'],calib['b_x'],calib['b_y'],input_edge_count,input_edge_indices, original_idx
+               GRM_keypoints_visible.astype(np.int32), calib['P'].astype(np.float32),calib['R0'].astype(np.float32),calib['C2V'].astype(np.float32),calib['c_u'].astype(np.float32), calib['c_v'].astype(np.float32),\
+               calib['f_u'].astype(np.float32),calib['f_v'].astype(np.float32),calib['b_x'].astype(np.float32),calib['b_y'].astype(np.float32),np.array([input_edge_count],dtype=np.int32),input_edge_indices, original_idx
 
 
 class DatasetCatalog:
@@ -546,9 +548,25 @@ class DatasetCatalog:
         raise RuntimeError("Dataset not available: {}".format(name))
 
 
-def create_kitti_dataset(cfg):
+# def imnormalize_column(img):
+#     """imnormalize operation for image"""
+#     # Computed from random subset of ImageNet training images
+#     mean = np.asarray([0.485, 0.456, 0.406])
+#     mean=mean[:,np.newaxis,np.newaxis]
+#     std = np.asarray([0.229, 0.224, 0.225])
+#     std = std[:, np.newaxis, np.newaxis]
+#     img_data=np.transpose(img,(2,0,1))
+#     img_data = img.copy().astype(np.float32)
+#     # cv2.cvtColor(img_data, cv2., img_data)  # inplace
+#     cv2.subtract(img_data, np.float64(mean.reshape(1, -1)), img_data)  # inplace
+#     cv2.multiply(img_data, 1 / np.float64(std.reshape(1, -1)), img_data)  # inplace
+#
+#     img_data = img_data.astype(np.float32)
+#     return img_data
+
+def create_kitti_dataset(cfg,istrain):
     '''create kitti'''
-    dataset_list = cfg.DATASETS.TRAIN if cfg.is_training else cfg.DATASETS.TEST
+    dataset_list = cfg.DATASETS.TRAIN if istrain else cfg.DATASETS.TEST
     if not isinstance(dataset_list, (list, tuple)):
         raise RuntimeError(
             "dataset_list should be a list of strings, got {}".format(dataset_list)
@@ -556,38 +574,55 @@ def create_kitti_dataset(cfg):
     datasetcatalog =DatasetCatalog(data_root=cfg.DATASETS.DATA_ROOT)
     datasets = []
     device_num=cfg.group_size
+    images_per_npu = cfg.SOLVER.IMS_PER_BATCH
     # cores = multiprocessing.cpu_count()
     # num_parallel_workers = int(cores / device_num)
-    if cfg.is_training:
-        images_per_batch = cfg.SOLVER.IMS_PER_BATCH
-        assert images_per_batch % device_num == 0, \
-            "SOLVER.IMS_PER_BATCH ({}) must be divisible by the number of GPUs ({}) used." \
-                .format(images_per_batch, device_num)
+    # if cfg.is_training:
+        # images_per_batch = cfg.SOLVER.IMS_PER_BATCH
+        # assert images_per_batch % device_num == 2, \
+        #     "SOLVER.IMS_PER_BATCH ({}) must be divisible by the number of GPUs ({}) used." \
+        #         .format(images_per_batch, device_num)
 
-        images_per_gpu = images_per_batch // device_num
-    else:
-        images_per_batch = cfg.TEST.IMS_PER_BATCH
-        assert images_per_batch % device_num == 0, \
-            "SOLVER.IMS_PER_BATCH ({}) must be divisible by the number of GPUs ({}) used." \
-                .format(images_per_batch, device_num)
+        # images_per_gpu = images_per_batch // device_num
+    # else:
+        # images_per_batch = cfg.TEST.IMS_PER_BATCH
+        # assert images_per_batch % 1 == 0, \
+        #     "SOLVER.IMS_PER_BATCH ({}) must be divisible by the number of GPUs ({}) used." \
+        #         .format(images_per_batch, 1)
 
-        images_per_gpu = images_per_batch // device_num
+        # images_per_gpu = images_per_batch // 1
     for dataset_name in dataset_list:  #create list of dataset
         data=datasetcatalog.get(dataset_name)
         kitti_dataset = KittiDataset(data["args"]['root'], cfg)
-        dataset_column_names=['img','size','is_train', 'cls_ids','target_centers', 'keypoints', 'keypoints_depth_mask',\
-               'dimensions', 'locations', 'reg_mask', 'reg_weight',\
-               'offset_3D', 'bboxes', 'pad_size', 'ori_img', 'rotys', 'trunc_mask',\
-               'alphas', 'orientations', 'heat_map', 'gt_bboxes',  'GRM_keypoints_visible', 'P','R0','C2V','c_u', 'c_v','f_u','f_v','b_x','b_y','input_edge_count','input_edge_indices', 'original_idx']
         distributed_sampler = DistributedSampler(len(kitti_dataset), device_num, cfg.rank, shuffle=True)
-        transformers_fn=Normalization(cfg)
-        kitti_dataset.transforms = transformers_fn
-        dataset = ds.GeneratorDataset(kitti_dataset, column_names=dataset_column_names, sampler=distributed_sampler,
-                                      python_multiprocessing=True, num_parallel_workers=images_per_gpu)
-        dataset=dataset.map(operations=transformers_fn,input_columns=['img'],num_parallel_workers=images_per_gpu, python_multiprocessing=True)
-        dataset = dataset.batch(images_per_gpu, num_parallel_workers=images_per_gpu, drop_remainder=True)
+        normalize_op = Normalize(mean=cfg.INPUT.PIXEL_MEAN, std=cfg.INPUT.PIXEL_STD, is_hwc=True)
+        # normalize_op=imnormalize_column
+        # transformers_fn =[normalize_op]
+        # kitti_dataset.transforms = transformers_fn
+        if cfg.is_training:
+            dataset_column_names = ['img', 'size', 'is_train', 'cls_ids', 'target_centers', 'keypoints',
+                                    'keypoints_depth_mask', \
+                                    'dimensions', 'locations', 'reg_mask', 'reg_weight', \
+                                    'offset_3D', 'bboxes', 'pad_size', 'ori_img', 'rotys', 'trunc_mask', \
+                                    'alphas', 'orientations', 'heat_map', 'gt_bboxes', 'GRM_keypoints_visible', 'P',
+                                    'R0', 'C2V', 'c_u', 'c_v', 'f_u', 'f_v', 'b_x', 'b_y', 'input_edge_count',
+                                    'input_edge_indices', 'original_idx']
+            dataset = ds.GeneratorDataset(kitti_dataset, column_names=dataset_column_names, sampler=distributed_sampler,
+                                          python_multiprocessing=True, num_parallel_workers=max(4,images_per_npu),shuffle=True)
+            dataset=dataset.map(operations=normalize_op,input_columns=['img'],num_parallel_workers=max(4,images_per_npu),
+                                python_multiprocessing=True)
+            dataset = dataset.batch(images_per_npu, num_parallel_workers=max(4,images_per_npu), drop_remainder=True)
+        else:
+            # img, img.size, self.is_train.astype(np.int32), pad_size, calib['P'], calib['R0'], calib['C2V'], calib[
+            #     'c_u'], calib['c_v'], \
+            #     calib['f_u'], calib['f_v'], calib['b_x'], calib['b_y'], input_edge_count, input_edge_indices
+            dataset_column_names = ['img', 'size', 'is_train', 'ori_img', 'P', 'R0', 'C2V', 'c_u', 'c_v', 'f_u', 'f_v',
+                                    'b_x', 'b_y', 'input_edge_count', 'input_edge_indices', 'original_idx']
+            dataset = ds.GeneratorDataset(kitti_dataset,column_names=dataset_column_names,sampler=distributed_sampler)
+            dataset = dataset.map(operations=normalize_op, input_columns=['img'])
+            dataset = dataset.batch(images_per_npu, drop_remainder=True)
         datasets.append(dataset)
-    if cfg.is_training:
+    if istrain and cfg.is_training:
         # during training, a single (possibly concatenated) data_loader is returned
         assert len(datasets) == 1
         return datasets[0]

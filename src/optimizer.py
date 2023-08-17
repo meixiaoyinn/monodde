@@ -1,3 +1,4 @@
+import math
 from mindspore import nn
 import mindspore as ms
 from collections import Counter
@@ -71,7 +72,7 @@ def get_lr(cfg,steps_per_epoch):
     # enable warmup
     warmup_epochs = cfg.SOLVER.WARMUP_EPOCH
     if cfg.SOLVER.LR_WARMUP:
-        assert warmup_scheduler is not None
+        # assert warmup_scheduler is not None
         lr = warmup_cosine_annealing_lr_sample(cfg.SOLVER.BASE_LR, steps_per_epoch, warmup_epochs,
                                                300, cfg.SOLVER.WARMUP_STEPS,
                                                cfg.SOLVER.BASE_LR / cfg.SOLVER.DIV_FACTOR)
@@ -84,23 +85,23 @@ def get_lr(cfg,steps_per_epoch):
 def get_optim(cfg,net,steps_per_epoch):
     optim_cfg = cfg.SOLVER
     params = get_param_groups(net,cfg)
-    lr=get_lr(cfg,steps_per_epoch)
+    # lr=get_lr(cfg,steps_per_epoch)
 
     # if optim_cfg.OPTIMIZER != 'adam_onecycle':
     #     model_params = get_param_groups(net)
 
     if optim_cfg.OPTIMIZER == 'adam':
-        optimizer = nn.Adam(params, learning_rate=optim_cfg.BASE_LR, weight_decay=ms.Tensor(optim_cfg.WEIGHT_DECAY),
+        optimizer = nn.Adam(params, learning_rate=optim_cfg.BASE_LR, weight_decay=optim_cfg.WEIGHT_DECAY,
                             beta1=0.9, beta2=0.99)
 
     elif optim_cfg.OPTIMIZER == 'adamw':
-        optimizer = nn.AdamWeightDecay(params, learning_rate=ms.Tensor(lr),
+        optimizer = nn.AdamWeightDecay(params, learning_rate=optim_cfg.BASE_LR,
                                        weight_decay=optim_cfg.WEIGHT_DECAY,
                                        beta1=0.9, beta2=0.99)
 
     elif optim_cfg.OPTIMIZER == 'sgd':
         optimizer = nn.SGD(
-            params, learning_rate=ms.Tensor(optim_cfg.BASE_LR), weight_decay=optim_cfg.WEIGHT_DECAY,
+            params, learning_rate=ms.Tensor(optim_cfg.BASE_LR,ms.float32), weight_decay=optim_cfg.WEIGHT_DECAY,
             momentum=optim_cfg.MOMENTUM
         )
 

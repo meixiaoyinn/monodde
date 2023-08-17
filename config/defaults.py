@@ -7,7 +7,7 @@ from yacs.config import CfgNode as CN
 
 _C = CN()
 _C.MODEL = CN()
-_C.MODEL.DEVICE = "CPU"
+_C.MODEL.DEVICE = "Ascend"
     #"cuda"
 _C.MODEL.WEIGHT = ""
 _C.MODEL.PRETRAIN = True
@@ -23,7 +23,7 @@ _C.MODEL.GRM_UNCERN = False
 _C.MODEL.INPLACE_ABN = False
 # -----------------------------------------------------------------------------
 #training
-_C.is_distributed=0
+_C.is_distributed=False
 _C.rank=0
 _C.local_rank=0
 _C.group_size=1
@@ -47,7 +47,7 @@ _C.INPUT.PIXEL_MEAN = [0.485, 0.456, 0.406]  # kitti
 # Values to be used for image normalization
 _C.INPUT.PIXEL_STD = [0.229, 0.224, 0.225]  # kitti
 # Convert image to BGR format
-_C.INPUT.TO_BGR = False
+_C.INPUT.TO_BGR = True
 _C.INPUT.MODIFY_ALPHA = False
 
 _C.INPUT.USE_APPROX_CENTER = False
@@ -296,6 +296,7 @@ _C.SOLVER.WARMUP_STEPS = -1
 
 # grad clip, not used
 _C.SOLVER.GRAD_NORM_CLIP = -1
+_C.SOLVER.loss_scale= 2
 
 _C.SOLVER.SAVE_CHECKPOINT_INTERVAL = 1000
 _C.SOLVER.SAVE_CHECKPOINT_MAX_NUM =500

@@ -150,6 +150,7 @@ def default_argument_parser():
     parser.add_argument("--num-machines", type=int, default=1)
     parser.add_argument("--is_training", type=bool,default=True,help='whether train')
     parser.add_argument("--pretrained", type=bool,default=False,help='whether pretrain dla34')
+    parser.add_argument("--distributed", type=bool, default=False, help='whether distributed train')
     parser.add_argument("--device", type=str, default='CPU', help='train device')
     parser.add_argument(
         "--machine-rank", type=int, default=0, help="the rank of this machine (unique per machine)"
@@ -186,7 +187,7 @@ def default_setup(cfg, args):
     logger = setup_logger(output_dir, file_name="log_{}.txt".format(cfg.START_TIME))
     logger.info("Using {} GPUs".format(args.num_gpus))
     logger.info("Collecting environment info")
-    logger.info(args)
+    # logger.info(args)
 
     logger.info("Loaded configuration file {}".format(args.config_path))
     with open(args.config_path, "r") as cf:

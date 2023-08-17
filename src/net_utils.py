@@ -7,6 +7,12 @@ from mindspore import ops
 from mindspore import Tensor
 
 
+def box_iou(box1, box2):
+	intersection = max((min(box1[2], box2[2]) - max(box1[0], box2[0])), 0) * max((min(box1[3], box2[3]) - max(box1[1], box2[1])), 0)
+	union = (box1[2] - box1[0]) * (box1[3] - box1[1]) + (box2[2] - box2[0]) * (box2[3] - box2[1]) - intersection
+
+	return intersection / union
+
 def project_image_to_rect(uv_depth,calib_dict):
     """ Input: nx3 first two channels are uv, 3rd channel
                is depth in rect camera coord.
@@ -17,7 +23,7 @@ def project_image_to_rect(uv_depth,calib_dict):
     y = ((uv_depth[:, 1] - calib_dict['c_u']) * uv_depth[:, 2]) / calib_dict['f_v'] + calib_dict['b_y']
 
     if isinstance(uv_depth, np.ndarray):
-        pts_3d_rect = np.zeros((n, 3))
+        pts_3d_rect = np.zeros((n, 3),ms.float32)
     else:
         pts_3d_rect = ops.zeros(uv_depth.shape,ms.float32)
 
@@ -26,6 +32,34 @@ def project_image_to_rect(uv_depth,calib_dict):
     pts_3d_rect[:, 2] = uv_depth[:, 2]
 
     return pts_3d_rect
+
+
+def select_point_of_interest(batch, index, feature_maps):
+    '''
+    Select POI(point of interest) on feature map
+    Args:
+        batch: batch size
+        index: in point format or index format
+        feature_maps: regression feature map in [N, C, H, W]
+
+    Returns:
+
+    '''
+    w = feature_maps.shape[3]
+    if len(index.shape) == 3:
+        index = index[:, :, 1] * w + index[:, :, 0]
+    index = index.view(batch, -1)
+    # [N, C, H, W] -----> [N, H, W, C]
+    feature_maps = ops.transpose(feature_maps, (0, 2, 3, 1))
+    channel = feature_maps.shape[-1]
+    # [N, H, W, C] -----> [N, H*W, C]
+    feature_maps = feature_maps.view(batch, -1, channel)
+    # expand index in channels
+    index = ops.tile(ops.expand_dims(index, -1), (1, 1, channel))  # [1,80,72]
+    # select specific features bases on POIs
+    feature_maps = feature_maps.gather_elements(1, index)  # Left feature_maps shape: (B, num_objs, C)
+
+    return feature_maps
 
 
 class Converter_key2channel(object):
@@ -53,14 +87,6 @@ def group_norm(out_channels):
     else:
         return nn.GroupNorm(num_groups // 2, out_channels)
 
-
-def sigmoid_hm(hm_features):
-    x = ops.Sigmoid()(hm_features)
-    x=ops.clamp(x,1e-4,1 - (1e-4))
-
-    return x
-
-
 def get_feature_by_index(x, p_h, p_w):
     """gather feature by specified index"""
     # x (n, c, h_in, w_in)
@@ -78,12 +104,12 @@ def get_feature_by_index(x, p_h, p_w):
     x = x.reshape(-1, c)
 
     # (n)
-    idx_0_n = ops.range(Tensor(0).astype(ms.int32), Tensor(n).astype(ms.int32), Tensor(1).astype(ms.int32))
+    idx_0_n = ops.range(Tensor(0,ms.int32), Tensor(n,ms.int32), Tensor(1,ms.int32))
     # (n, h, w, k*k) + (n, h, w, k*k) + (n, 1, 1, 1) -> (n, h, w, k*k)
     index = p_w + p_h * w_in + idx_0_n.reshape(n, 1, 1, 1) * w_in * h_in
 
     # (n*h_in*w_in, c), (n, h, w, k*k) -> (n, h, w, k*k, c)
-    x_offset = ops.Gather()(x, index, 0)
+    x_offset = ops.gather(x, index, 0)
     # (n, h*w*k*k, c) -> (n, h*w, k*k, c)
     x_offset = x_offset.reshape(n, h * w, k2, c)
     # (n, h*w, k*k, c) -> (n, c, h*w, k*k)
@@ -101,7 +127,7 @@ def regenerate_feature_map(x_offset):
     # (n, c, h, w, k*k) -> k * (n, c, h, w, k)
     splits = ops.Split(axis=-1, output_num=k)(x_offset)
     # k * (n, c, h, w, k) -> (n, c, h, k*w, k)
-    x_offset = ops.Concat(axis=3)(splits)
+    x_offset = ops.concat(splits,axis=3)
     # (n, c, h, k*w, k) -> (n, c, h*k, w*k)
     x_offset = x_offset.reshape(n, c, h * k, w * k)
     return x_offset

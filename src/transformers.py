@@ -1,6 +1,5 @@
+import numpy as np
 from mindspore.dataset.vision import Normalize
-import mindspore.ops as ops
-import mindspore as ms
 
 
 class Normalization:
@@ -18,7 +17,7 @@ class Normalization:
         else:
             print('Do not use Normalize in cpu environmental.')
         if self.to_bgr:
-            image = image[[2, 1, 0]]
+            image = np.transpose(image,(2,0,1))
 
         return image
 
