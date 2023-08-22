@@ -3,8 +3,8 @@
 # import mindspore as ms
 # import mindspore.nn as nn
 import mindspore.communication as comm
-from mindspore import amp
-from mindspore.amp import init_status, all_finite
+# from mindspore import amp
+# from mindspore.amp import init_status, all_finite
 from config import cfg
 import datetime
 from tqdm import tqdm
@@ -183,8 +183,10 @@ def train_preprocess():
     cfg=setup(config)
     if cfg.MODEL.DEVICE=='Ascend':
         device_id = get_device_id()
-        ms.set_context(mode=ms.PYNATIVE_MODE, device_target=cfg.MODEL.DEVICE, device_id=device_id,pynative_synchronize=True,save_graphs=True,
-                       save_graphs_path='output/graph')  #pynative_synchronize=True,save_graphs=True
+        ms.set_context(mode=ms.PYNATIVE_MODE, device_target=cfg.MODEL.DEVICE, device_id=device_id,pynative_synchronize=True)  #pynative_synchronize=True,save_graphs=True,save_graphs_path='output/graph'
+        ms.set_context(enable_compile_cache=True, compile_cache_path="output/my_compile_cache")
+        # ms.set_context(mode=ms.GRAPH_MODE, device_target=cfg.MODEL.DEVICE, device_id=device_id,print_file_path='log.data')
+        # ms.set_context(save_graphs=True, save_graphs_path="output/graph")
     else:
         ms.context.set_context(mode=ms.PYNATIVE_MODE, device_target=cfg.MODEL.DEVICE, device_id=0)
     device=ms.get_context("device_target")
@@ -233,10 +235,11 @@ def train():
     network = Mono_net(cfg)
     # network=amp.auto_mixed_precision(network, "O2")
     #val_network = Mono_net(cfg)
-    network = MonoddeWithLossCell(network,cfg)
+    # network = MonoddeWithLossCell(network,cfg)
+    loss_fn=LossNet()
     opt=get_optim(cfg,network,steps_per_epoch)
     # network = nn.TrainOneStepCell(network, opt,sens=2)
-    network=TrainOneStepCell(network, opt, scale_sense=cfg.SOLVER.loss_scale,grad_clip=True)
+    # network=TrainOneStepCell(network, opt, scale_sense=cfg.SOLVER.loss_scale,grad_clip=True)
 
     network.set_train()
     logger = logging.getLogger("monoflex.trainer")
@@ -259,19 +262,41 @@ def train():
 
     iter_per_epoch=cfg.SOLVER.IMS_PER_BATCH
 
-    summary_collect_frequency = 1
+    # summary_collect_frequency = 1
+
+    # Define forward function
+    def forward_fn(images, edge_infor, targets_heatmap, targets_original,targets_select,calibs,iteration):
+        # images = ops.transpose(images, (0, 3, 1, 2))
+        output = network(images, edge_infor,targets_heatmap,targets_original,targets_select,calibs,iteration)
+        # weights=network.weight
+        loss = loss_fn(output)
+        print("loss = {}".format(loss))
+        return loss,output
+
+    # Get gradient function
+    grad_fn = ops.value_and_grad(forward_fn, None, opt.parameters, has_aux=True)
+
+    # @ms.jit
+    def train_step(images, edge_infor, targets_heatmap, targets_original,targets_select,calibs,iteration):
+        (loss,_), grads = grad_fn(images, edge_infor, targets_heatmap, targets_original,targets_select,calibs,iteration)
+        # if loss.asnumpy() != float("inf") and loss.asnumpy() <10000:
+        # loss = ops.depend(loss, opt(grads))
+        return loss
 
     # with ms.SummaryRecord('./summary_dir/summary_04', network=network) as summary_record:
     for data, iteration in tqdm(zip(data_loader,range(0, max_iter))):
         data_time = time.time() - end
-        images, edge_infor, targets_heatmap, targets_variables = prepare_targets(data,cfg)
-        loss = network(images, edge_infor, targets_heatmap, targets_variables,iteration)
+        images, edge_infor, targets_heatmap, targets_original,targets_select,calibs = prepare_targets(data,cfg)
+        if iteration>=2:
+            print(iteration)
+        loss = train_step(images, edge_infor, targets_heatmap, targets_original,targets_select,calibs,iteration)
         meters.update(loss=loss.asnumpy())
         batch_time = time.time() - end
         end = time.time()
         meters.update(time=batch_time, data=data_time)
-        print(loss)
-        # else:continue
+        # if iteration % summary_collect_frequency == 0:
+        #     summary_record.add_value('scalar', 'loss', loss)
+        #     summary_record.record(iteration)
 
         eta_seconds = meters.time.global_avg * (max_iter - iteration)
         eta_string = str(datetime.timedelta(seconds=int(eta_seconds)))

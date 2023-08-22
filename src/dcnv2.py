@@ -54,23 +54,28 @@ class GetOffsetPosition(nn.Cell):
         self.cat_a1 = ops.Concat(axis=1)
         self.tile = ops.Tile()
         self.dtype = ops.DType()
-        self.range = nn.Range(-self.begin, self.begin + 1)
+        # self.range = nn.Range(-self.begin, self.begin + 1)
         # self.cast = ops.Cast()
 
     def construct(self, offset):
         """get target position"""
         offset_shape = self.shape(offset) # b * 2N * h * w
         N, h, w = offset_shape[1] // 2, offset_shape[2], offset_shape[3]
+        k = int(N ** 0.5)
+            # (k)
+        range_pn = ms.Tensor(np.arange(-(k - 1) // 2, (k - 1) // 2 + 1),ms.float32)
         # get p_n
-        range_pn = self.range()
+        # range_pn = self.range()
         p_n_x, p_n_y = self.meshgrid((range_pn, range_pn))
         # (2N, 1)
         p_n = self.cat_a0((self.reshape(p_n_x, (N, 1)), self.reshape(p_n_y, (N, 1))))
         p_n = self.reshape(p_n, (1, 2 * N, 1, 1))
 
         # get p_0
-        range_h = nn.Range(self.begin, h*self.stride + 1, self.stride)()
-        range_w = nn.Range(self.begin, w*self.stride + 1, self.stride)()
+        range_h = ms.Tensor(np.arange(k // 2, h * self.stride + 1, self.stride), ms.float32)
+        range_w = ms.Tensor(np.arange(k // 2, w * self.stride + 1, self.stride), ms.float32)
+        # range_h = nn.Range(self.begin, h*self.stride + 1, self.stride)()
+        # range_w = nn.Range(self.begin, w*self.stride + 1, self.stride)()
         p_0_x, p_0_y = self.meshgrid((range_h, range_w))
         p_0_x = self.reshape(p_0_x, (1, 1, h, w))
         p_0_x = self.tile(p_0_x, (1, N, 1, 1))
@@ -118,7 +123,8 @@ class GetSurroundFeature(nn.Cell):
         # (b * hwN)
         q = q_h * w_p + q_w
         q = self.reshape(q, (-1, 1))
-        ind_b = nn.Range(0, b, 1)()
+        ind_b=ms.Tensor(np.arange(0, b, 1),ms.int32)
+        # ind_b = nn.Range(0, b, 1)()
         ind_b = self.reshape(ind_b, (-1, 1))
         ind_b = self.tile(ind_b, (1, hwn))
         ind_b = self.reshape(ind_b, (-1, 1))

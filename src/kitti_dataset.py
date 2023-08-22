@@ -1,5 +1,6 @@
 import logging
 import numpy as np
+from mindspore.dataset import vision
 
 from config import TYPE_ID_CONVERSION
 import mindspore.dataset as ds
@@ -595,7 +596,8 @@ def create_kitti_dataset(cfg,istrain):
         data=datasetcatalog.get(dataset_name)
         kitti_dataset = KittiDataset(data["args"]['root'], cfg)
         distributed_sampler = DistributedSampler(len(kitti_dataset), device_num, cfg.rank, shuffle=True)
-        normalize_op = Normalize(mean=cfg.INPUT.PIXEL_MEAN, std=cfg.INPUT.PIXEL_STD, is_hwc=True)
+        normalize = Normalize(mean=cfg.INPUT.PIXEL_MEAN, std=cfg.INPUT.PIXEL_STD, is_hwc=True)
+        map_op=[normalize,vision.HWC2CHW()]
         # normalize_op=imnormalize_column
         # transformers_fn =[normalize_op]
         # kitti_dataset.transforms = transformers_fn
@@ -609,7 +611,7 @@ def create_kitti_dataset(cfg,istrain):
                                     'input_edge_indices', 'original_idx']
             dataset = ds.GeneratorDataset(kitti_dataset, column_names=dataset_column_names, sampler=distributed_sampler,
                                           python_multiprocessing=True, num_parallel_workers=max(4,images_per_npu),shuffle=True)
-            dataset=dataset.map(operations=normalize_op,input_columns=['img'],num_parallel_workers=max(4,images_per_npu),
+            dataset=dataset.map(operations=map_op,input_columns=['img'],num_parallel_workers=max(4,images_per_npu),
                                 python_multiprocessing=True)
             dataset = dataset.batch(images_per_npu, num_parallel_workers=max(4,images_per_npu), drop_remainder=True)
         else:

@@ -1,5 +1,5 @@
 import math
-from mindspore import nn
+from mindspore import nn, ops
 import mindspore as ms
 from collections import Counter
 import numpy as np
@@ -82,6 +82,23 @@ def get_lr(cfg,steps_per_epoch):
 
     return lr
 
+
+# Define a new optimizer class by inheriting your original optimizer.
+class MyOptimizer(nn.AdamWeightDecay):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._original_construct = super().construct
+        self.histogram_summary = ops.HistogramSummary()
+        self.gradient_names = [param.name + ".gradient" for param in self.parameters]
+
+    def construct(self, grads):
+        # Record gradient.
+        l = len(self.gradient_names)
+        for i in range(l):
+            self.histogram_summary(self.gradient_names[i], grads[i])
+        return self._original_construct(grads)
+
+
 def get_optim(cfg,net,steps_per_epoch):
     optim_cfg = cfg.SOLVER
     params = get_param_groups(net,cfg)
@@ -95,6 +112,9 @@ def get_optim(cfg,net,steps_per_epoch):
                             beta1=0.9, beta2=0.99)
 
     elif optim_cfg.OPTIMIZER == 'adamw':
+        # optimizer = MyOptimizer(params, learning_rate=optim_cfg.BASE_LR,
+        #                                weight_decay=optim_cfg.WEIGHT_DECAY,
+        #                                beta1=0.9, beta2=0.99)
         optimizer = nn.AdamWeightDecay(params, learning_rate=optim_cfg.BASE_LR,
                                        weight_decay=optim_cfg.WEIGHT_DECAY,
                                        beta1=0.9, beta2=0.99)

@@ -1,4 +1,5 @@
 import numpy as np
+from mindspore.ops import constexpr
 
 from config import cfg
 import mindspore as ms
@@ -6,6 +7,19 @@ from mindspore import nn
 from mindspore import ops
 from mindspore import Tensor
 
+
+
+@constexpr
+def construct_zeros(shape):
+    if shape is None:
+        raise ValueError("input is an unknown value")
+    return ops.zeros(shape, ms.float32)
+
+@constexpr
+def construct_tensor(shape):
+    if shape is None:
+        raise ValueError("input is an unknown value")
+    return Tensor(shape, ms.float32)
 
 def box_iou(box1, box2):
 	intersection = max((min(box1[2], box2[2]) - max(box1[0], box2[0])), 0) * max((min(box1[3], box2[3]) - max(box1[1], box2[1])), 0)

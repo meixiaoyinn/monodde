@@ -1228,7 +1228,7 @@ class EvalWrapper:
         elif self.output_depth == 'keypoints':
             pred_depths = self.decode_depth_from_keypoints(pred_offset_3D, pred_keypoint_offset,
                                                                         pred_dimensions, targets['calib'])
-            pred_uncertainty = pred_regression_pois[:, self.key2channel('corner_uncertainty')].exp()
+            pred_uncertainty = self.exp(pred_regression_pois[:, self.key2channel('corner_uncertainty')])
             pred_depths = pred_depths[ops.arange(pred_depths.shape[0]), ops.argmin(pred_uncertainty,1)]  # Use the depth estimation with the smallest uncertainty.
 
         elif self.output_depth == 'combine':

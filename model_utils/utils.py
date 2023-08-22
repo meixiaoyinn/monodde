@@ -9,7 +9,10 @@ import numpy
 import numpy as np
 from mindspore import Tensor, ops, nn
 import mindspore as ms
-from shapely import Polygon
+from mindspore.ops import constexpr
+
+
+# from shapely import Polygon
 
 
 def rad_to_matrix(rotys, N):
@@ -108,7 +111,7 @@ def prepare_targets(data,cfg):
     per_batch=cfg.SOLVER.IMS_PER_BATCH
     down_ratio = cfg.MODEL.BACKBONE.DOWN_RATIO
     corner_loss_depth = cfg.MODEL.HEAD.CORNER_LOSS_DEPTH
-    edge_infor = [data[-3], data[-2]]
+    edge_infor = (data[-3], data[-2])
     calibs = []
     for i in range(per_batch):
         calibs.append(
@@ -118,66 +121,73 @@ def prepare_targets(data,cfg):
     reg_mask = ops.cast(data[9], ms.bool_)
     ori_imgs = ops.cast(data[14], ms.int32)
     trunc_mask = ops.cast(data[16], ms.int32)
-    flatten_reg_mask_gt = reg_mask.view(-1).asnumpy().tolist()  # flatten_reg_mask_gt shape: (B * num_objs)
+    flatten_reg_mask_gt = reg_mask.view(-1)  # flatten_reg_mask_gt shape: (B * num_objs)
+    flatten_reg_mask_gt_index=ops.cast(ops.nonzero(flatten_reg_mask_gt),ms.int32)
 
     # the corresponding image_index for each object, used for finding pad_size, calib and so on
     batch_idxs = ops.arange(per_batch,dtype=ms.int32).view(-1,1).expand_as(reg_mask).reshape(-1) # batch_idxs shape: (B * num_objs)
-    batch_idxs = batch_idxs[flatten_reg_mask_gt]  # Only reserve the features of valid objects.
-    valid_targets_bbox_points = data[4].view(-1, 2)[flatten_reg_mask_gt]  # valid_targets_bbox_points shape: (valid_objs, 2)
+    batch_idxs = ops.gather_nd(batch_idxs,flatten_reg_mask_gt_index)  # Only reserve the features of valid objects.
+    valid_targets_bbox_points = ops.gather_nd(data[4].view(-1, 2),flatten_reg_mask_gt_index)  # valid_targets_bbox_points shape: (valid_objs, 2)
 
     # fcos-style targets for 2D
-    target_bboxes_2D = data[12].view(-1, 4)[flatten_reg_mask_gt]  # target_bboxes_2D shape: (valid_objs, 4). 4 -> (x1, y1, x2, y2)
+    target_bboxes_2D = ops.gather_nd(data[12].view(-1, 4),flatten_reg_mask_gt_index)  # target_bboxes_2D shape: (valid_objs, 4). 4 -> (x1, y1, x2, y2)
     target_bboxes_height = target_bboxes_2D[:, 3] - target_bboxes_2D[:, 1]  # target_bboxes_height shape: (valid_objs,)
     target_bboxes_width = target_bboxes_2D[:, 2] - target_bboxes_2D[:, 0]  # target_bboxes_width shape: (valid_objs,)
 
     target_regression_2D = ops.concat((valid_targets_bbox_points - target_bboxes_2D[:, :2], target_bboxes_2D[:,2:] - valid_targets_bbox_points),axis=1)  # offset to 2D bbox boundaries.
-    mask_regression_2D = ops.logical_and(target_bboxes_height > 0,target_bboxes_width > 0)
-    mask_regression_2D=mask_regression_2D.asnumpy().tolist()
-    target_regression_2D = target_regression_2D[mask_regression_2D]  # target_regression_2D shape: (valid_objs, 4)
+    mask_regression_2D = ops.logical_and(ops.ge(target_bboxes_height , 0),ops.ge(target_bboxes_width ,0))
+    mask_regression_2D=ops.cast(ops.nonzero(mask_regression_2D),ms.int32)
+    target_regression_2D = ops.gather_nd(target_regression_2D,mask_regression_2D)  # target_regression_2D shape: (valid_objs, 4)
 
     # targets for 3D
-    target_clses = data[3].view(-1)[flatten_reg_mask_gt]  # target_clses shape: (val_objs,)
-    target_depths_3D = data[8][..., -1].view(-1)[flatten_reg_mask_gt]  # target_depths_3D shape: (val_objs,)
-    target_rotys_3D = data[15].view(-1)[flatten_reg_mask_gt]  # target_rotys_3D shape: (val_objs,)
-    target_alphas_3D = data[17].view(-1)[flatten_reg_mask_gt]  # target_alphas_3D shape: (val_objs,)
-    target_offset_3D = data[11].view(-1, 2)[flatten_reg_mask_gt]  # The offset from target centers to projected 3D centers. target_offset_3D shape: (val_objs, 2)
-    target_dimensions_3D = data[7].view(-1, 3)[flatten_reg_mask_gt]  # target_dimensions_3D shape: (val_objs, 3)
+    target_clses = ops.gather_nd(data[3].view(-1),flatten_reg_mask_gt_index)  # target_clses shape: (val_objs,)
+    target_depths_3D = ops.gather_nd(data[8][..., -1].view(-1),flatten_reg_mask_gt_index)  # target_depths_3D shape: (val_objs,)
+    target_rotys_3D = ops.gather_nd(data[15].view(-1),flatten_reg_mask_gt_index)  # target_rotys_3D shape: (val_objs,)
+    target_alphas_3D = ops.gather_nd(data[17].view(-1),flatten_reg_mask_gt_index)  # target_alphas_3D shape: (val_objs,)
+    target_offset_3D = ops.gather_nd(data[11].view(-1, 2),flatten_reg_mask_gt_index)  # The offset from target centers to projected 3D centers. target_offset_3D shape: (val_objs, 2)
+    target_dimensions_3D = ops.gather_nd(data[7].view(-1, 3),flatten_reg_mask_gt_index)  # target_dimensions_3D shape: (val_objs, 3)
 
-    target_orientation_3D = data[18].view(-1, data[18].shape[-1])[flatten_reg_mask_gt]  # target_orientation_3D shape: (num_objs, 8)
+    target_orientation_3D = ops.gather_nd(data[18].view(-1, data[18].shape[-1]),flatten_reg_mask_gt_index)  # target_orientation_3D shape: (num_objs, 8)
     target_locations_3D = decode_location_flatten(valid_targets_bbox_points, target_offset_3D,
                                           target_depths_3D,calibs,data[13],batch_idxs,down_ratio)  # target_locations_3D shape: (valid_objs, 3)
     target_corners_3D = encode_box3d(target_rotys_3D, target_dimensions_3D, target_locations_3D)  # target_corners_3D shape: (valid_objs, 8, 3)
     target_bboxes_3D = ops.concat((target_locations_3D, target_dimensions_3D, target_rotys_3D[:, None]),axis=1)  # target_bboxes_3D shape: (valid_objs, 7)
 
-    target_trunc_mask = trunc_mask.view(-1)[flatten_reg_mask_gt]  # target_trunc_mask shape(valid_objs,)
-    obj_weights = data[10].view(-1)[flatten_reg_mask_gt]  # obj_weights shape: (valid_objs,)
-    target_corner_keypoints = data[5].view(len(flatten_reg_mask_gt), -1, 3)[flatten_reg_mask_gt]  # target_corner_keypoints shape: (val_objs, 10, 3)
-    target_corner_depth_mask = data[6].view(-1, 3)[flatten_reg_mask_gt]
+    target_trunc_mask = ops.gather_nd(trunc_mask.view(-1),flatten_reg_mask_gt_index)  # target_trunc_mask shape(valid_objs,)
+    obj_weights = ops.gather_nd(data[10].view(-1),flatten_reg_mask_gt_index)  # obj_weights shape: (valid_objs,)
+    target_corner_keypoints = ops.gather_nd(data[5].view(flatten_reg_mask_gt.shape[0], -1, 3),flatten_reg_mask_gt_index)  # target_corner_keypoints shape: (val_objs, 10, 3)
+    target_corner_depth_mask = ops.gather_nd(data[6].view(-1, 3),flatten_reg_mask_gt_index)
 
-    keypoints_visible = data[21].view(-1, data[21].shape[-1])[flatten_reg_mask_gt]  # keypoints_visible shape: (valid_objs, 11)
-    if corner_loss_depth == 'GRM':
-        keypoints_visible = ops.tile(ops.expand_dims(keypoints_visible, 2), (1, 1, 2)).reshape((keypoints_visible.shape[0], -1))  # The effectness of first 22 GRM equations.
-        GRM_valid_items = ops.concat((keypoints_visible, ops.ones((keypoints_visible.shape[0], 3), ms.bool_)),axis=1)  # GRM_valid_items shape: (valid_objs, 25)
-    elif corner_loss_depth == 'soft_GRM':
-        keypoints_visible = ops.tile(ops.expand_dims(keypoints_visible[:, 0:8], 2), (1, 1, 2)).reshape((keypoints_visible.shape[0], -1))  # The effectiveness of the first 16 equations. shape: (valid_objs, 16)
-        direct_depth_visible = ops.ones((keypoints_visible.shape[0], 1), ms.bool_)
-        veritical_group_visible = ops.cast(data[6].view(-1, 3)[flatten_reg_mask_gt],ms.bool_)  # veritical_group_visible shape: (valid_objs, 3)
-        GRM_valid_items = ops.concat((ops.cast(keypoints_visible,ms.bool_), direct_depth_visible, veritical_group_visible),axis=1)  # GRM_valid_items shape: (val_objs, 20)
-    else:
-        GRM_valid_items = None
+    keypoints_visible = ops.gather_nd(data[21].view(-1, data[21].shape[-1]),flatten_reg_mask_gt_index)  # keypoints_visible shape: (valid_objs, 11)
+    # if corner_loss_depth == 'GRM':
+    #     keypoints_visible = ops.tile(ops.expand_dims(keypoints_visible, 2), (1, 1, 2)).reshape((keypoints_visible.shape[0], -1))  # The effectness of first 22 GRM equations.
+    #     GRM_valid_items = ops.concat((keypoints_visible, ops.ones((keypoints_visible.shape[0], 3), ms.bool_)),axis=1)  # GRM_valid_items shape: (valid_objs, 25)
+    # elif corner_loss_depth == 'soft_GRM':
+    keypoints_visible = ops.tile(ops.expand_dims(keypoints_visible[:, 0:8], 2), (1, 1, 2)).reshape((keypoints_visible.shape[0], -1))  # The effectiveness of the first 16 equations. shape: (valid_objs, 16)
+    direct_depth_visible = ops.ones((keypoints_visible.shape[0], 1), ms.bool_)
+    veritical_group_visible = ops.cast(ops.gather_nd(data[6].view(-1, 3),flatten_reg_mask_gt_index),ms.bool_)  # veritical_group_visible shape: (valid_objs, 3)
+    GRM_valid_items = ops.concat((ops.cast(keypoints_visible,ms.bool_), direct_depth_visible, veritical_group_visible),axis=1)  # GRM_valid_items shape: (val_objs, 20)
+    # else:
+    #     GRM_valid_items = None
         # preparing outputs
-    return_dict = {'cls_ids':data[3],'pad_size':data[13],'target_centers':data[4],'calib':calibs,'reg_2D': target_regression_2D, 'offset_3D': target_offset_3D, 'depth_3D': target_depths_3D,
-               'orien_3D': target_orientation_3D,'valid_targets_bbox_points':valid_targets_bbox_points,
-               'dims_3D': target_dimensions_3D, 'corners_3D': target_corners_3D, 'width_2D': target_bboxes_width,
-               'rotys_3D': target_rotys_3D,'target_clses':target_clses,
-               'cat_3D': target_bboxes_3D, 'trunc_mask_3D': target_trunc_mask, 'height_2D': target_bboxes_height,
-               'GRM_valid_items': GRM_valid_items.asnumpy().tolist(),'target_corner_depth_mask':target_corner_depth_mask,
-               'locations': target_locations_3D,'obj_weights':obj_weights,'target_corner_keypoints':target_corner_keypoints,'mask_regression_2D':mask_regression_2D,
-                   'flatten_reg_mask_gt':flatten_reg_mask_gt,'batch_idxs':batch_idxs,'keypoints':data[5],'keypoints_depth_mask':data[6],
-                   'ori_imgs':ori_imgs
-               }
+    targets_original=(data[3],data[4],data[5],data[6],data[13])
+    targets_select=(target_regression_2D,target_offset_3D,target_depths_3D,target_orientation_3D,valid_targets_bbox_points,
+                    target_dimensions_3D,target_corners_3D,target_bboxes_width,target_rotys_3D,target_clses,target_bboxes_3D,#10
+                    target_trunc_mask,target_bboxes_height,GRM_valid_items,target_corner_depth_mask,target_locations_3D,obj_weights,
+                    target_corner_keypoints,mask_regression_2D,flatten_reg_mask_gt_index,batch_idxs,ori_imgs)
+    # return_dict = {'cls_ids':data[3],'pad_size':data[13],'target_centers':data[4],'calib':calibs,'reg_2D': target_regression_2D,
+    #                'offset_3D': target_offset_3D, 'depth_3D': target_depths_3D,
+    #            'orien_3D': target_orientation_3D,'valid_targets_bbox_points':valid_targets_bbox_points,
+    #            'dims_3D': target_dimensions_3D, 'corners_3D': target_corners_3D, 'width_2D': target_bboxes_width,
+    #            'rotys_3D': target_rotys_3D,'target_clses':target_clses,
+    #            'cat_3D': target_bboxes_3D, 'trunc_mask_3D': target_trunc_mask, 'height_2D': target_bboxes_height,
+    #            'GRM_valid_items': GRM_valid_items,'target_corner_depth_mask':target_corner_depth_mask,
+    #            'locations': target_locations_3D,'obj_weights':obj_weights,'target_corner_keypoints':target_corner_keypoints,'mask_regression_2D':mask_regression_2D,
+    #                'flatten_reg_mask_gt':flatten_reg_mask_gt,'batch_idxs':batch_idxs,'keypoints':data[5],'keypoints_depth_mask':data[6],
+    #                'ori_imgs':ori_imgs
+    #            }
 
-    return data[0], edge_infor, data[19], return_dict
+    return data[0], edge_infor, data[19], targets_original,targets_select,calibs
 
 
 class SmoothedValue():
