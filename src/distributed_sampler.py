@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ============================================================================
-"""Yolo dataset distributed sampler."""
+"""Monodde dataset distributed sampler."""
 from __future__ import division
 import math
 import numpy as np

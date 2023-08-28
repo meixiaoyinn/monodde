@@ -234,18 +234,18 @@ class DeformConv2d(nn.Cell):
 
         # (b, h, w, N)
         q_lt_h, q_lt_w = self.half(q_lt)
-        q_lt_h = ops.clip_by_value(q_lt_h, ms.Tensor(0,q_lt_h.dtype), ms.Tensor(x_shape[2] - 1,q_lt_h.dtype))
-        q_lt_w = ops.clip_by_value(q_lt_w, ms.Tensor(0,q_lt_h.dtype), ms.Tensor(x_shape[3] - 1,q_lt_w.dtype))
+        q_lt_h = ops.clip_by_value(q_lt_h, 0, x_shape[2] - 1)
+        q_lt_w = ops.clip_by_value(q_lt_w, 0, x_shape[3] - 1)
         # (b, h, w, N)
         q_rb_h, q_rb_w = self.half(q_rb)
-        q_rb_h = ops.clip_by_value(q_rb_h, ms.Tensor(0,q_rb_h.dtype), ms.Tensor(x_shape[2] - 1,q_rb_h.dtype))
-        q_rb_w = ops.clip_by_value(q_rb_w, ms.Tensor(0,q_rb_w.dtype), ms.Tensor(x_shape[3] - 1,q_rb_w.dtype))
+        q_rb_h = ops.clip_by_value(q_rb_h, 0, x_shape[2] - 1)
+        q_rb_w = ops.clip_by_value(q_rb_w, 0, x_shape[3] - 1)
 
         # clip p
         p_h, p_w = self.half(p)
         dtype = self.dtype(offset)
-        p_h = ops.clip_by_value(p_h, ms.Tensor(0, dtype), ms.Tensor(x_shape[2] - 1, dtype))
-        p_w = ops.clip_by_value(p_w, ms.Tensor(0, dtype), ms.Tensor(x_shape[3] - 1, dtype))
+        p_h = ops.clip_by_value(p_h, 0, x_shape[2] - 1)
+        p_w = ops.clip_by_value(p_w, 0, x_shape[3] - 1)
 
         # bilinear kernel (b, h, w, N)
         g_lt = (1 + (q_lt_h - p_h)) * (1 + (q_lt_w - p_w))

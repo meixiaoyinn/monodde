@@ -148,23 +148,23 @@ class Mono_loss(nn.Cell):
         self.multibin = (cfg.INPUT.ORIENTATION == 'multi-bin')
         self.orien_bin_size = cfg.INPUT.ORIENTATION_BIN_SIZE
         self.trunc_offset_loss_type = cfg.MODEL.HEAD.TRUNCATION_OFFSET_LOSS
-        self.td_dim_index = self.key2channel('2d_dim')
-        self.tid_dim_index = self.key2channel('3d_dim')
-        self.td_offset_index = self.key2channel('3d_offset')
-        self.ori_cls_index = self.key2channel('ori_cls')
-        self.ori_offset_index = self.key2channel('ori_offset')
-        self.corner_offset_index = self.key2channel('corner_offset')
-        self.combined_depth_uncern_index = self.key2channel('combined_depth_uncern')
-        self.corner_loss_uncern_index = self.key2channel('corner_loss_uncern')
-        self.corner_uncertainty_index = self.key2channel('corner_uncertainty')
-        if 'GRM_uncern' in self.ct_keys:
-            self.GRM_uncern_index = self.key2channel('GRM_uncern')
-        self.GRM1_uncern_index = self.key2channel('GRM1_uncern')
-        self.GRM2_uncern_index = self.key2channel('GRM2_uncern')
-        self.Mono_Direct_uncern_index = self.key2channel('Mono_Direct_uncern')
-        self.Mono_Keypoint_uncern_index = self.key2channel('Mono_Keypoint_uncern')
-        self.depth_index = self.key2channel('depth')
-        self.depth_uncertainty_index = self.key2channel('depth_uncertainty')
+        self.td_dim_index = self.key2channel('2d_dim')  #self.key2channel('2d_dim')
+        self.tid_dim_index = self.key2channel('3d_dim')  #(49,52,1)
+        self.td_offset_index = self.key2channel('3d_offset') #(4,6,1)
+        self.ori_cls_index = self.key2channel('ori_cls')  #(52,60,1)
+        self.ori_offset_index = self.key2channel('ori_offset') #(60,68,1)
+        self.corner_offset_index = self.key2channel('corner_offset')  #(6,26,1)
+        self.combined_depth_uncern_index = self.key2channel('combined_depth_uncern')  #(70,71,1)
+        self.corner_loss_uncern_index = self.key2channel('corner_loss_uncern') #(70,72,1)
+        self.corner_uncertainty_index = self.key2channel('corner_uncertainty')  #(26,29,1)
+        # if 'GRM_uncern' in self.ct_keys:
+        #     self.GRM_uncern_index = self.key2channel('GRM_uncern')
+        self.GRM1_uncern_index = self.key2channel('GRM1_uncern')  #(29,37,1)
+        self.GRM2_uncern_index = self.key2channel('GRM2_uncern')  #(37,45,1)
+        self.Mono_Direct_uncern_index = self.key2channel('Mono_Direct_uncern')  #(45,46,1)
+        self.Mono_Keypoint_uncern_index = self.key2channel('Mono_Keypoint_uncern')  #(46,49,1)
+        self.depth_index = self.key2channel('depth')  #(68,69,1)
+        self.depth_uncertainty_index = self.key2channel('depth_uncertainty')  #(69,70,1)
 
         # whether to compute corner loss
         self.compute_direct_depth_loss = 'depth_loss' in self.loss_keys
@@ -214,14 +214,12 @@ class Mono_loss(nn.Cell):
         self.zeros=ops.Zeros()
         self.relu=ops.ReLU()
 
-        self.concat = ops.Concat(axis=1)
         self.reducesum = ops.ReduceSum()
         self.reducesum_t=ops.ReduceSum(True)
         self.reducemean = ops.ReduceMean()
         self.ones = ops.Ones()
         self.concat_0=ops.Concat(0)
 
-        self.exp = ops.Exp()
         self.sigmoid = ops.Sigmoid()
         self.zeros = ops.Zeros()
         self.l2_norm = ops.L2Normalize()
@@ -234,7 +232,7 @@ class Mono_loss(nn.Cell):
         self.stack_1=ops.Stack(1)
         self.stack_0 = ops.Stack(0)
 
-        self.EPS = 1e-9
+        self.EPS = 1
         # center related
         self.num_cls = len(cfg.DATASETS.DETECT_CLASSES)
         self.min_radius = cfg.DATASETS.MIN_RADIUS
@@ -303,7 +301,9 @@ class Mono_loss(nn.Cell):
         # 2. extract corresponding predictions
         flatten_reg_mask_gt=targets_select[19]
         mask_regression_2D=targets_select[18]
+        ops.print_('pred_regression max:', pred_regression.max())
         pred_regression_pois_3D=self.reshape(select_point_of_interest(batch, targets_original[1], pred_regression),(-1, channel))
+        ops.print_('pred_regression_pois_3D max:', pred_regression_pois_3D.max())
         pred_regression_pois_3D=self.gather_nd(pred_regression_pois_3D,flatten_reg_mask_gt)   # pred_regression_pois_3D shape: (valid_objs, C)
         pred_regression_2D = self.gather_nd(pred_regression_pois_3D, mask_regression_2D)[::, self.td_dim_index]
         pred_regression_2D = self.relu(pred_regression_2D)  # pred_regression_2D shape: (valid_objs, 4)
@@ -340,8 +340,7 @@ class Mono_loss(nn.Cell):
 
         # predict the uncertainties of the solved depths from groups of keypoints
         # if self.corner_with_uncertainty:
-        preds_corner_offset_uncertainty = pred_regression_pois_3D[::,
-                                          self.corner_uncertainty_index]  # preds['corner_offset_uncertainty'] shape: (val_objs, 3)
+        preds_corner_offset_uncertainty = pred_regression_pois_3D[::, self.corner_uncertainty_index]  # preds['corner_offset_uncertainty'] shape: (val_objs, 3)
 
         # if self.uncertainty_range is not None:
         preds_corner_offset_uncertainty = ops.clip_by_value(preds_corner_offset_uncertainty, self.uncertainty_range[0],
@@ -422,45 +421,48 @@ class Mono_loss(nn.Cell):
 
             # else:
                 # N x K x 3
+            self.print('preds_keypoints',preds_keypoints)
+            preds_keypoints=ops.clip_by_value(preds_keypoints,clip_value_max=ms.Tensor(10000,ms.float32))
             keypoint_loss=self.keypoint_loss(preds_keypoints, targets_keypoints,targets_keypoints_mask)
             output.append(keypoint_loss)
             self.print('keypoint_loss:',keypoint_loss)
-            if self.compute_keypoint_depth_loss:
-                keypoint_depth_loss=self.keypoint_depth_loss(preds_keypoints_depths,target_corner_depth_mask,preds_corner_offset_uncertainty,targets_select[2])
-                keypoint_depth_loss=ops.clip_by_value(keypoint_depth_loss,clip_value_max=ms.Tensor(1000,self.ms_type))
-                output.append(keypoint_depth_loss)
-                self.print('keypoint_depth_loss:', keypoint_depth_loss)
+            # if self.compute_keypoint_depth_loss:
+            self.print('preds_keypoints_depths', preds_keypoints_depths)
+            keypoint_depth_loss=self.keypoint_depth_loss(preds_keypoints_depths,target_corner_depth_mask,preds_corner_offset_uncertainty,targets_select[2])
+            keypoint_depth_loss=ops.clip_by_value(keypoint_depth_loss,clip_value_max=ms.Tensor(1000,self.ms_type))
+            output.append(keypoint_depth_loss)
+            self.print('keypoint_depth_loss:', keypoint_depth_loss)
 
-            if self.corner_with_uncertainty:
-                if self.pred_direct_depth and self.depth_with_uncertainty:
-                    combined_depth = self.concat((ops.expand_dims(pred_direct_depths_3D, 1), (preds_keypoints_depths)))
-                    depth_uncertainty=ops.expand_dims(preds_depth_uncertainty, 1)
-                    uncertainty=self.concat((depth_uncertainty,preds_corner_offset_uncertainty))
-                    combined_uncertainty = self.exp(uncertainty)
-                else:
-                    combined_depth = preds_keypoints_depths
-                    combined_uncertainty = self.exp(preds_corner_offset_uncertainty)
+            # if self.corner_with_uncertainty:
+            if self.pred_direct_depth and self.depth_with_uncertainty:
+                combined_depth = self.concat((ops.expand_dims(pred_direct_depths_3D, 1), (preds_keypoints_depths)))
+                depth_uncertainty=ops.expand_dims(preds_depth_uncertainty, 1)
+                uncertainty=self.concat((depth_uncertainty,preds_corner_offset_uncertainty))
+                combined_uncertainty = self.exp(uncertainty)
+            else:
+                combined_depth = preds_keypoints_depths
+                combined_uncertainty = self.exp(preds_corner_offset_uncertainty)
 
-                combined_weights = 1 / combined_uncertainty
-                combined_weights = combined_weights / combined_weights.sum(axis=1, keepdims=True)
-                soft_depths = self.reducesum(combined_depth * combined_weights, 1)
+            combined_weights = 1 / combined_uncertainty
+            combined_weights = combined_weights / combined_weights.sum(axis=1, keepdims=True)
+            soft_depths = self.reducesum(combined_depth * combined_weights, 1)
 
-                if self.compute_weighted_depth_loss:
-                    soft_depth_loss = self.loss_weights['weighted_avg_depth_loss'] * \
-                                      self.reg_loss_fnc(soft_depths, targets_select[2])
-                    output.append(soft_depth_loss)
-                    self.print('soft_depth_loss:',soft_depth_loss)
+            if self.compute_weighted_depth_loss:
+                soft_depth_loss = self.loss_weights['weighted_avg_depth_loss'] * \
+                                  self.reg_loss_fnc(soft_depths, targets_select[2])
+                output.append(soft_depth_loss)
+                self.print('soft_depth_loss:',soft_depth_loss)
 
-            if self.compute_combined_depth_loss:  # The loss for final estimated depth.
-                combined_depth_loss = self.reg_loss_fnc(pred_corner_depth_3D, targets_select[2])
-                if self.combined_depth_uncern:
-                    combined_depth_uncern = preds_combined_depth_uncern.squeeze(1)
-                    combined_depth_loss = combined_depth_loss / combined_depth_uncern + self.log(combined_depth_uncern)
-                # if self.cfg.SOLVER.DYNAMIC_WEIGHT:
-                #     combined_depth_loss = self.reweight_loss(combined_depth_loss, objs_weight)
-                combined_depth_loss = self.loss_weight_ramper(iteration) * self.loss_weights['combined_depth_loss'] * self.reducemean(combined_depth_loss)
-                output.append(combined_depth_loss)
-                self.print('combined_depth_loss:',combined_depth_loss)
+            # if self.compute_combined_depth_loss:  # The loss for final estimated depth.
+            combined_depth_loss = self.reg_loss_fnc(pred_corner_depth_3D, targets_select[2])
+            # if self.combined_depth_uncern:
+            combined_depth_uncern = preds_combined_depth_uncern.squeeze(1)
+            combined_depth_loss = combined_depth_loss / combined_depth_uncern + self.log(combined_depth_uncern)
+            # if self.cfg.SOLVER.DYNAMIC_WEIGHT:
+            #     combined_depth_loss = self.reweight_loss(combined_depth_loss, objs_weight)
+            combined_depth_loss = self.loss_weight_ramper(iteration) * self.loss_weights['combined_depth_loss'] * self.reducemean(combined_depth_loss)
+            output.append(combined_depth_loss)
+            self.print('combined_depth_loss:',combined_depth_loss)
 
             # if self.compute_SoftGRM_loss:
             GRM_valid_items = targets_select[13]  # GRM_valid_items shape: (val_objs, 20)
@@ -519,131 +521,6 @@ class Mono_loss(nn.Cell):
         '''
         w_loss = loss * weight
         return w_loss
-
-
-    # def prepare_predictions(self, targets_original,targets_select,calibs,predictions):
-    #     pred_regression = predictions[1]
-    #     batch, channel, feat_h, feat_w = pred_regression.shape
-    #
-    #     # 2. extract corresponding predictions
-    #     flatten_reg_mask_gt=targets_select[19]
-    #     mask_regression_2D=targets_select[18]
-    #     pred_regression_pois_3D = self.gather_nd(select_point_of_interest(batch, targets_original[1], pred_regression).reshape(-1, channel),flatten_reg_mask_gt) # pred_regression_pois_3D shape: (valid_objs, C)
-    #     # pred_regression_pois_3D=pred_regression_pois_3D[mask_regression_2D]
-    #     pred_regression_2D=self.gather_nd(pred_regression_pois_3D,mask_regression_2D)[::,self.td_dim_index]
-    #     pred_regression_2D = self.relu(pred_regression_2D)  # pred_regression_2D shape: (valid_objs, 4)
-    #     pred_offset_3D = pred_regression_pois_3D[::,self.td_offset_index]  # pred_offset_3D shape: (valid_objs, 2)
-    #     pred_dimensions_offsets_3D = pred_regression_pois_3D[::, self.tid_dim_index]  # pred_dimensions_offsets_3D shape: (valid_objs, 3)
-    #     pred_orientation_3D = self.concat((pred_regression_pois_3D[::, self.ori_cls_index],pred_regression_pois_3D[::, self.ori_offset_index]))  # pred_orientation_3D shape: (valid_objs, 16)
-    #
-    #     # decode the pred residual dimensions to real dimensions
-    #     pred_dimensions_3D = self.decode_dimension(targets_select[9], pred_dimensions_offsets_3D)
-    #
-    #     weights=targets_select[16]
-    #
-    #     # predict the depth with direct regression
-    #     # if self.pred_direct_depth:
-    #     pred_depths_offset_3D = pred_regression_pois_3D[:, self.depth_index].squeeze(-1)
-    #     pred_direct_depths_3D = self.decode_depth(pred_depths_offset_3D)
-    #     preds_depth_3D = pred_direct_depths_3D  # pred_direct_depths_3D shape: (valid_objs,)
-    #
-    #     # predict the uncertainty of depth regression
-    #     # if self.depth_with_uncertainty:
-    #     preds_depth_uncertainty = pred_regression_pois_3D[:, self.depth_uncertainty_index].squeeze(1)  # preds['depth_uncertainty'] shape: (val_objs,)
-    #
-    #         # if self.uncertainty_range is not None:
-    #     preds_depth_uncertainty = ops.clip_by_value(preds_depth_uncertainty,self.uncertainty_range[0], self.uncertainty_range[1])
-    #
-    #     # predict the keypoints
-    #     # if self.compute_keypoint_corner:
-    #         # targets for keypoints
-    #     target_corner_keypoints = self.gather_nd(targets_original[2].view((self.max_objs*batch, -1, 3)),flatten_reg_mask_gt)  # target_corner_keypoints shape: (val_objs, 10, 3)
-    #     targets_keypoints = target_corner_keypoints[..., :2]  # targets['keypoints'] shape: (val_objs, 10, 2)
-    #     targets_keypoints_mask = target_corner_keypoints[..., -1]  # targets['keypoints_mask'] shape: (val_objs, 10)
-    #
-    #     # mask for whether depth should be computed from certain group of keypoints
-    #     target_corner_depth_mask = self.gather_nd(targets_original[3].view(-1, 3),flatten_reg_mask_gt)
-    #     targets_keypoints_depth_mask = self.cast(target_corner_depth_mask,ms.bool_)  # target_corner_depth_mask shape: (val_objs, 3)
-    #     targets=(targets_select[0], targets_select[1], targets_select[2],
-    #                targets_select[3],targets_select[5], targets_select[6], targets_select[7], targets_select[8],
-    #                targets_select[10], targets_select[11], targets_select[12],#10
-    #                targets_select[13], targets_select[15],flatten_reg_mask_gt,targets_keypoints,targets_keypoints_depth_mask,targets_keypoints_mask)
-    #
-    #     # predictions for keypoints
-    #     pred_keypoints_3D = pred_regression_pois_3D[::, self.corner_offset_index]
-    #     pred_keypoints_3D = pred_keypoints_3D.view((flatten_reg_mask_gt.shape[0], -1, 2))
-    #     preds_keypoints = pred_keypoints_3D  # pred_keypoints_3D shape: (val_objs, 10, 2)
-    #
-    #     pred_keypoints_depths_3D = self.decode_depth_from_keypoints_batch(pred_keypoints_3D,
-    #                                                                                    pred_dimensions_3D,
-    #                                                                                    calibs,
-    #                                                                                    targets_select[20])
-    #     preds_keypoints_depths = pred_keypoints_depths_3D  # pred_keypoints_depths_3D shape: (val_objs, 3)
-    #
-    #     # Optimize combined_depth with uncertainty
-    #     # if self.combined_depth_uncern:
-    #     combined_depth_uncern = pred_regression_pois_3D[::, self.combined_depth_uncern_index]
-    #     preds_combined_depth_uncern = self.exp(ops.clip_by_value(combined_depth_uncern, self.uncertainty_range[0],self.uncertainty_range[1]))
-    #
-    #     # Optimize corner coordinate loss with uncertainty
-    #     # if self.corner_loss_uncern:
-    #     corner_loss_uncern = pred_regression_pois_3D[::, self.corner_loss_uncern_index]
-    #     preds_corner_loss_uncern = self.exp(ops.clip_by_value(corner_loss_uncern, self.uncertainty_range[0],self.uncertainty_range[1]))
-    #
-    #     # predict the uncertainties of the solved depths from groups of keypoints
-    #     # if self.corner_with_uncertainty:
-    #     preds_corner_offset_uncertainty = pred_regression_pois_3D[::, self.corner_uncertainty_index]  # preds['corner_offset_uncertainty'] shape: (val_objs, 3)
-    #
-    #     # if self.uncertainty_range is not None:
-    #     preds_corner_offset_uncertainty = ops.clip_by_value(preds_corner_offset_uncertainty,self.uncertainty_range[0],self.uncertainty_range[1])
-    #
-    #     uncern_GRM1 = pred_regression_pois_3D[::,self.GRM1_uncern_index]  # uncern_GRM1 shape: (num_objs, 8)
-    #     uncern_GRM2 = pred_regression_pois_3D[::,self.GRM2_uncern_index]  # uncern_GRM1 shape: (num_objs, 8)
-    #     uncern_Mono_Direct = pred_regression_pois_3D[::,self.Mono_Direct_uncern_index]  # uncern_Mono_Direct shape: (num_objs, 1)
-    #     uncern_Mono_Keypoint = pred_regression_pois_3D[::, self.Mono_Keypoint_uncern_index]  # uncern_Mono_Keypoint shape: (num_objs, 3)
-    #     GRM_uncern = self.concat((uncern_GRM1, uncern_GRM2))
-    #     GRM_uncern = self.concat((GRM_uncern, uncern_Mono_Direct, uncern_Mono_Keypoint))  # GRM_uncern shape: (num_objs, 20)
-    #     GRM_uncern = self.exp(ops.clip_by_value(GRM_uncern, self.uncertainty_range[0], self.uncertainty_range[1]))
-    #     assert GRM_uncern.shape[1] == 20
-    #
-    #     pred_combined_depths = self.concat((ops.expand_dims(pred_direct_depths_3D,1), pred_keypoints_depths_3D))  # pred_combined_depths shape: (valid_objs, 4)
-    #     # info_dict = {'target_centers': targets_select[4], 'offset_3D': targets_select[1],
-    #     #              'pad_size': targets_original[4],
-    #     #              'calib': calibs, 'batch_idxs': targets_select[20]}
-    #     info_dict =(targets_select[4], targets_select[1],
-    #                   targets_original[4],
-    #                   calibs, targets_select[20])
-    #     GRM_rotys, _ = self.decode_axes_orientation(pred_orientation_3D, dict_for_3d_center=info_dict)
-    #
-    #     pred_vertex_offset = pred_keypoints_3D[:, 0:8, :]  # Do not use the top center and bottom center.
-    #     pred_corner_depth_3D, separate_depths = self.decode_from_SoftGRM(ops.expand_dims(GRM_rotys,1),
-    #                                                                                   pred_dimensions_3D,
-    #                                                                                   pred_vertex_offset.reshape(-1,16),
-    #                                                                                   pred_combined_depths,
-    #                                                                                   targets_dict=info_dict,
-    #                                                                                   GRM_uncern=GRM_uncern,
-    #                                                                                   batch_idxs=targets_select[20])  # pred_corner_depth_3D shape: (val_objs,), separate_depths shape: (val_objs, 20)
-    #
-    #     pred_locations_3D = self.decode_location_flatten(targets_select[4], pred_offset_3D,
-    #                                                                   pred_corner_depth_3D,
-    #                                                                   calibs,
-    #                                                                   targets_original[4],
-    #                                                                   targets_select[20])  # pred_locations_3D shape: (val_objs, 3)
-    #     # decode rotys and alphas
-    #     pred_rotys_3D,_ = self.decode_axes_orientation(pred_orientation_3D,locations=pred_locations_3D)  # pred_rotys_3D shape: (val_objs,)
-    #     # encode corners
-    #     pred_corners_3D = self.encode_box3d(pred_rotys_3D, pred_dimensions_3D, pred_locations_3D)  # pred_corners_3D shape: (val_objs, 8, 3)
-    #     # concatenate all predictions
-    #     pred_bboxes_3D = self.concat((pred_locations_3D, pred_dimensions_3D, pred_rotys_3D[::, None]))  # pred_bboxes_3D shape: (val_objs, 7)
-    #
-    #     # preds.update({'corners_3D': pred_corners_3D, 'rotys_3D': pred_rotys_3D, 'cat_3D': pred_bboxes_3D})
-    #     preds = (pred_regression_2D, pred_offset_3D, pred_orientation_3D,
-    #              pred_dimensions_3D, mask_regression_2D,preds_depth_3D,preds_depth_uncertainty,preds_keypoints,preds_keypoints_depths
-    #              ,preds_combined_depth_uncern,preds_corner_loss_uncern,preds_corner_offset_uncertainty,pred_corner_depth_3D,
-    #              separate_depths,  GRM_uncern, pred_corners_3D, pred_rotys_3D, pred_bboxes_3D)
-    #
-    #     return targets, preds,  weights
-
 
     def encode_box3d(self, rotys, dims, locs):
         '''
@@ -740,11 +617,10 @@ class Mono_loss(nn.Cell):
         # batch_size = len(calibs)
         gts = ops.unique(batch_idxs)[0].asnumpy().tolist()
         locations = self.zeros((points.shape[0], 3), ms.float32)
-        points = (points + offsets) * self.down_ratio - pad_size[
-            batch_idxs]  # Left points: The 3D centers in original images.
+        points = (points + offsets) * self.down_ratio - pad_size[batch_idxs]  # Left points: The 3D centers in original images.
 
         for idx, gt in enumerate(gts):
-            corr_pts_idx = ops.nonzero(batch_idxs == gt).squeeze(-1)
+            corr_pts_idx = ops.cast(ops.nonzero((batch_idxs == gt)),ms.int32).squeeze(-1)
             calib = calibs[gt]
             # concatenate uv with depth
             corr_pts_depth = self.concat((points[corr_pts_idx], depths[corr_pts_idx, None]))
@@ -791,15 +667,15 @@ class Mono_loss(nn.Cell):
         if batch_size == 1:
             batch_idxs = self.zeros(pred_dimensions.shape[0], self.ms_type)
 
-        center_height = pred_keypoints[:, -2, 1] - pred_keypoints[:, -1, 1]  # [2]
+        center_height = pred_keypoints[::, -2, 1] - pred_keypoints[::, -1, 1]  # [2]
 
-        corner_02_height = pred_keypoints[:, [0, 2], 1] - pred_keypoints[:, [4, 6], 1]  # [2,2]
-        corner_13_height = pred_keypoints[:, [1, 3], 1] - pred_keypoints[:, [5, 7], 1]  # [2,2]
+        corner_02_height = pred_keypoints[::, [0, 2], 1] - pred_keypoints[::, [4, 6], 1]  # [2,2]
+        corner_13_height = pred_keypoints[::, [1, 3], 1] - pred_keypoints[::, [5, 7], 1]  # [2,2]
 
         center= []
         corner_02= []
         corner_13= []
-        emu_item=ops.unique(ops.cast(batch_idxs, ms.int32))[0]
+        emu_item=ops.unique(ops.cast(batch_idxs, ms.int32))[0].asnumpy().tolist()
         idx=0
         for gt_idx in emu_item:
             calib = calibs[idx]
@@ -842,14 +718,14 @@ class Mono_loss(nn.Cell):
         '''
         cls_dimension_mean = self.dim_mean[cls_id]
 
-        if self.dim_modes[0] == 'exp':
-            dims_offset = self.exp(dims_offset)
+        # if self.dim_modes[0] == 'exp':
+        dims_offset = self.exp(dims_offset)
 
-        if self.dim_modes[2]:
-            cls_dimension_std = self.dim_std[cls_id, :]
-            dimensions = dims_offset * cls_dimension_std + cls_dimension_mean
-        else:
-            dimensions = dims_offset * cls_dimension_mean
+        # if self.dim_modes[2]:
+        #     cls_dimension_std = self.dim_std[cls_id, :]
+        #     dimensions = dims_offset * cls_dimension_std + cls_dimension_mean
+        # else:
+        dimensions = dims_offset * cls_dimension_mean
 
         return dimensions
 
@@ -873,33 +749,33 @@ class Mono_loss(nn.Cell):
                          for testing we need both alpha and roty
 
         '''
-        if self.multibin:
-            pred_bin_cls = vector_ori[:, : self.orien_bin_size * 2].reshape(-1, self.orien_bin_size, 2)
-            pred_bin_cls = self.softmax_axis2(pred_bin_cls)[..., 1]
-            pred_bin_cls_arg = ops.argmax(pred_bin_cls,1)
-            orientations = self.zeros((vector_ori.shape[0],), vector_ori.dtype)
-            for i in range(self.orien_bin_size):
-                indx=ops.cast((pred_bin_cls_arg == i),ms.float32)
-                if indx.sum() == 0: continue
-                mask_i = self.nonzero(pred_bin_cls_arg == i)
-                s = self.orien_bin_size * 2 + i * 2
-                e = s + 2
-                pred_bin_offset=self.gather_nd(vector_ori,mask_i)
-                pred_bin_offset=pred_bin_offset[:,s: e]
-                bin_offset=self.atan2(pred_bin_offset[:, 0], pred_bin_offset[:, 1]) + self.alpha_centers[i]
-                mask_i=self.cast(mask_i, ms.int32)
-                orientations=ops.tensor_scatter_add(orientations, mask_i, bin_offset)
-        else:
-            axis_cls = self.softmax(vector_ori[::, :2])
-            axis_cls = axis_cls[:, 0] < axis_cls[::, 1]
-            head_cls = self.softmax(vector_ori[::, 2:4])
-            head_cls = head_cls[:, 0] < head_cls[:, 1]
-            # cls axis
-            orientations = self.alpha_centers[axis_cls + head_cls * 2]
-            sin_cos_offset = self.l2_norm(vector_ori[::, 4:])
-            # bin_ipdates=ops.atan(sin_cos_offset[:, 0] / sin_cos_offset[:, 1])
-
-            orientations += ops.atan(sin_cos_offset[:, 0] / sin_cos_offset[:, 1])
+        # if self.multibin:
+        pred_bin_cls = vector_ori[:, : self.orien_bin_size * 2].reshape(-1, self.orien_bin_size, 2)
+        pred_bin_cls = self.softmax_axis2(pred_bin_cls)[..., 1]
+        pred_bin_cls_arg = ops.argmax(pred_bin_cls,1)
+        orientations = self.zeros((vector_ori.shape[0],), vector_ori.dtype)
+        for i in range(self.orien_bin_size):
+            indx=ops.cast((pred_bin_cls_arg == i),ms.float32)
+            if indx.sum() == 0: continue
+            mask_i = self.nonzero(pred_bin_cls_arg == i)
+            s = self.orien_bin_size * 2 + i * 2
+            e = s + 2
+            pred_bin_offset=self.gather_nd(vector_ori,mask_i)
+            pred_bin_offset=pred_bin_offset[:,s: e]
+            bin_offset=self.atan2(pred_bin_offset[:, 0], pred_bin_offset[:, 1]) + self.alpha_centers[i]
+            mask_i=self.cast(mask_i, ms.int32)
+            orientations=ops.tensor_scatter_add(orientations, mask_i, bin_offset)
+        # else:
+        #     axis_cls = self.softmax(vector_ori[::, :2])
+        #     axis_cls = axis_cls[:, 0] < axis_cls[::, 1]
+        #     head_cls = self.softmax(vector_ori[::, 2:4])
+        #     head_cls = head_cls[:, 0] < head_cls[:, 1]
+        #     # cls axis
+        #     orientations = self.alpha_centers[axis_cls + head_cls * 2]
+        #     sin_cos_offset = self.l2_norm(vector_ori[::, 4:])
+        #     # bin_ipdates=ops.atan(sin_cos_offset[:, 0] / sin_cos_offset[:, 1])
+        #
+        #     orientations += ops.atan(sin_cos_offset[:, 0] / sin_cos_offset[:, 1])
         if locations is not None:  # Compute rays based on 3D locations.
             locations = locations.view(-1, 3)
             rays = self.atan2(locations[:, 0], locations[:, 2])
@@ -908,24 +784,29 @@ class Mono_loss(nn.Cell):
                 batch_idxs = self.zeros((vector_ori.shape[0],), ms.uint8)
             else:
                 batch_idxs = dict_for_3d_center[4]
+            ops.print_('offset_3D:', dict_for_3d_center[1])
             centers_3D = self.decode_3D_centers(dict_for_3d_center[0], dict_for_3d_center[1],
                                                 dict_for_3d_center[2], batch_idxs)
+            ops.print_('centers_3D:',centers_3D)
             centers_3D_x = centers_3D[:, 0]  # centers_3D_x shape: (total_num_objs,)
 
             c_u = self.stack_0([calib['c_u'] for calib in dict_for_3d_center[3]])
             f_u = self.stack_0([calib['f_u'] for calib in dict_for_3d_center[3]])
             # b_x = ops.stack([calib['b_x'] for calib in dict_for_3d_center['calib']],axis=0)
 
-            rays = ops.zeros_like(orientations)
+            rays = self.zeros(orientations.shape,self.ms_type)
             for idx, gt_idx in enumerate(ops.unique(batch_idxs)[0]):
                 corr_idx = self.nonzero(batch_idxs == gt_idx).squeeze(1)
                 corr_idx=self.cast(corr_idx,ms.int32)
                 centers_3D_x=centers_3D_x[corr_idx]
                 centers_3D_x_atan=self.atan2(centers_3D_x - c_u[idx], f_u[idx])
                 # print()
-                rays=ops.tensor_scatter_add(rays, self.expand_dims(corr_idx,1), centers_3D_x_atan)  # This is exactly an approximation.
+                corr_idx=self.expand_dims(corr_idx,1)
+                rays=ops.tensor_scatter_add(rays, corr_idx, centers_3D_x_atan)  # This is exactly an approximation.
         else:
-            raise Exception("locations and dict_for_3d_center should not be None simultaneously.")
+            locations = locations.view(-1, 3)
+            rays = self.zeros(orientations.shape, self.ms_type)
+        #     raise Exception("locations and dict_for_3d_center should not be None simultaneously.")
         alphas = orientations
         rotys = alphas + rays
 
@@ -1209,7 +1090,7 @@ class Mono_loss(nn.Cell):
         pad_size = targets_dict[2]  # shape: (B, 2)
 
         if len(calibs) == 1:  # Batch size is 1.
-            batch_idxs = self.zeros((val_objs_num,), ms.uint8)
+            batch_idxs = self.zeros((val_objs_num,), ms.int32)
 
         if GRM_uncern is not None:
             assert GRM_uncern.shape[1] == 20
@@ -1305,7 +1186,7 @@ class Mono_loss(nn.Cell):
 
 
 class LossNet(nn.Cell):
-    """FasterRcnn loss method"""
+    """Monodde loss method"""
 
     def construct(self, loss):
         # loss_sum=0

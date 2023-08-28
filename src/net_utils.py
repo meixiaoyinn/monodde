@@ -36,10 +36,10 @@ def project_image_to_rect(uv_depth,calib_dict):
     x = ((uv_depth[:, 0] - calib_dict['c_u']) * uv_depth[:, 2]) / calib_dict['f_u'] + calib_dict['b_x']
     y = ((uv_depth[:, 1] - calib_dict['c_u']) * uv_depth[:, 2]) / calib_dict['f_v'] + calib_dict['b_y']
 
-    if isinstance(uv_depth, np.ndarray):
-        pts_3d_rect = np.zeros((n, 3),ms.float32)
-    else:
-        pts_3d_rect = ops.zeros(uv_depth.shape,ms.float32)
+    # if isinstance(uv_depth, np.ndarray):
+    #     pts_3d_rect = np.zeros((n, 3),ms.float32)
+    # else:
+    pts_3d_rect = ops.zeros(uv_depth.shape,ms.float32)
 
     pts_3d_rect[:, 0] = x
     pts_3d_rect[:, 1] = y
@@ -69,11 +69,11 @@ def select_point_of_interest(batch, index, feature_maps):
     # [N, H, W, C] -----> [N, H*W, C]
     feature_maps = feature_maps.view(batch, -1, channel)
     # expand index in channels
-    index = ops.tile(ops.expand_dims(index, -1), (1, 1, channel))  # [1,80,72]
+    indexs = ops.tile(ops.expand_dims(index, -1), (1, 1, channel))  # [1,80,72]
     # select specific features bases on POIs
-    feature_maps = feature_maps.gather_elements(1, index)  # Left feature_maps shape: (B, num_objs, C)
+    feature_mapss = feature_maps.gather_elements(1, indexs)  # Left feature_maps shape: (B, num_objs, C)
 
-    return feature_maps
+    return feature_mapss
 
 
 class Converter_key2channel(object):

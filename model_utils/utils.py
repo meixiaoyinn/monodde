@@ -20,9 +20,9 @@ def rad_to_matrix(rotys, N):
 
     cos, sin = ops.cos(rotys), ops.sin(rotys)
 
-    i_temp = ops.Tensor([[1, 0, 1],
+    i_temp = ms.Tensor([[1, 0, 1],
                          [0, 1, 0],
-                         [-1, 0, 1]], dtype=ms.float32)
+                         [-1, 0, 1]], ms.float32)
 
     ry = i_temp.tile((N, 1)).view(N, -1, 3)
 
@@ -45,14 +45,13 @@ def encode_box3d(rotys, dims, locs):
     Returns:
 
     '''
-    if len(rotys.shape) == 2:
-        rotys = rotys.flatten()
-    if len(dims.shape) == 3:
-        dims = dims.view(-1, 3)
-    if len(locs.shape) == 3:
-        locs = locs.view(-1, 3)
+    # if len(rotys.shape) == 2:
+    #     rotys = rotys.flatten()
+    # if len(dims.shape) == 3:
+    #     dims = dims.view(-1, 3)
+    # if len(locs.shape) == 3:
+    #     locs = locs.view(-1, 3)
 
-    # device = rotys.device
     N = rotys.shape[0]
     ry = rad_to_matrix(rotys, N)
 
@@ -80,10 +79,10 @@ def project_image_to_rect(uv_depth,calib_dict):
     x = ((uv_depth[:, 0] - calib_dict['c_u']) * uv_depth[:, 2]) / calib_dict['f_u'] + calib_dict['b_x']
     y = ((uv_depth[:, 1] - calib_dict['c_u']) * uv_depth[:, 2]) / calib_dict['f_v'] + calib_dict['b_y']
 
-    if isinstance(uv_depth, np.ndarray):
-        pts_3d_rect = np.zeros((n, 3))
-    else:
-        pts_3d_rect = ops.zeros(uv_depth.shape,ms.float32)
+    # if isinstance(uv_depth, np.ndarray):
+    #     pts_3d_rect = np.zeros((n, 3))
+    # else:
+    pts_3d_rect = ops.zeros(uv_depth.shape,ms.float32)
 
     pts_3d_rect[:, 0] = x
     pts_3d_rect[:, 1] = y
@@ -92,12 +91,12 @@ def project_image_to_rect(uv_depth,calib_dict):
     return pts_3d_rect
 def decode_location_flatten(points, offsets, depths, calibs, pad_size, batch_idxs,down_ratio):
     batch_size = len(calibs)
-    gts = ops.unique(batch_idxs)[0]
+    gts = ops.unique(batch_idxs)[0].asnumpy().tolist()
     locations = ops.zeros((points.shape[0], 3), ms.float32)
     points = (points + offsets) * down_ratio - pad_size[batch_idxs]  # Left points: The 3D centers in original images.
 
     for idx, gt in enumerate(gts):
-        corr_pts_idx = ops.nonzero(batch_idxs == gt).squeeze(-1)
+        corr_pts_idx = ops.cast(ops.nonzero(batch_idxs == gt),ms.int32).squeeze(-1)
         calib = calibs[gt]
         # concatenate uv with depth
         corr_pts_depth = ops.concat((points[corr_pts_idx], depths[corr_pts_idx, None]),1)
@@ -110,7 +109,7 @@ def prepare_targets(data,cfg):
     # print('prepare_targets')
     per_batch=cfg.SOLVER.IMS_PER_BATCH
     down_ratio = cfg.MODEL.BACKBONE.DOWN_RATIO
-    corner_loss_depth = cfg.MODEL.HEAD.CORNER_LOSS_DEPTH
+    # corner_loss_depth = cfg.MODEL.HEAD.CORNER_LOSS_DEPTH
     edge_infor = (data[-3], data[-2])
     calibs = []
     for i in range(per_batch):
@@ -260,7 +259,7 @@ class MetricLogger():
 
 
 def get_device_id():
-    device_id = os.getenv('DEVICE_ID', '0')
+    device_id = os.getenv('DEVICE_ID', '1')
     return int(device_id)
 
 

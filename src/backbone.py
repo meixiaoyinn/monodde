@@ -5,7 +5,7 @@ import numpy as np
 from mindspore import nn
 from mindspore import ops
 from mindspore.common.initializer import initializer,XavierUniform
-from .net_utils import *
+# from net_utils import *
 
 from .dcnv2 import DeformConv2d
 import logging
@@ -21,7 +21,7 @@ def build_backbone(cfg):
                    batchsize=cfg.SOLVER.IMS_PER_BATCH,
                    pretrained=cfg.MODEL.PRETRAIN,
                    down_ratio=cfg.MODEL.BACKBONE.DOWN_RATIO,
-                   last_level=5,
+                   last_level=5
                    )
     # BATCH_SIZE=cfg.SOLVER.IMS_PER_BATCH
     return model
@@ -68,6 +68,9 @@ class DLASeg(nn.Cell):
             y.append(x[i])
         y=self.ida_up(y, 0, len(y))
 
+        ops.print_('features max:',y[-1].max())
+        ops.print_('features nan:',ops.nonzero(ops.isnan(y[-1])).shape[0])
+        y[-1]=ops.clip_by_value(y[-1],ms.Tensor(1e-4, ms.float32), ms.Tensor(1 - 1e-4, ms.float32))
         return y[-1]
 
 
@@ -75,13 +78,11 @@ class BasicBlock(nn.Cell):
     def __init__(self, inplanes, planes,batchsize, stride=1, dilation=1, norm_type = 'BIN',BN_MOMENTUM=0.9):
         super(BasicBlock, self).__init__()
         self.conv1= nn.Conv2d(inplanes,planes, kernel_size=3,
-                               stride=stride, pad_mode='pad',padding=dilation,
-                               has_bias=False, dilation=dilation)
+                               stride=stride, pad_mode='pad',padding=dilation, dilation=dilation)
         self.bn1=get_norm(planes,batchsize,norm_type=norm_type,momentum=BN_MOMENTUM)
         self.relu=nn.ReLU()
         self.conv2=nn.Conv2d(planes,planes, kernel_size=3,
-                               stride=1, pad_mode='pad',padding=dilation,
-                               has_bias=False, dilation=dilation)
+                               stride=1, pad_mode='pad',padding=dilation, dilation=dilation)
         self.bn2=get_norm(planes,batchsize,norm_type=norm_type,momentum=BN_MOMENTUM)
 
     def construct(self, x, residual=None):
@@ -121,8 +122,10 @@ class DLA(nn.Cell):
         super(DLA, self).__init__()
         self.channels = channels
         self.num_classes = num_classes
-        self.base_layer=Con_norm_act(in_channel=3,out_channel=channels[0],kernel_size=7,stride=1,pad_mode='pad',padding=3,has_bias=False
-                                     ,BN_MOMENTUM=BN_MOMENTUM)
+        self.base_layer = nn.SequentialCell(nn.Conv2d(3, channels[0], kernel_size=7,
+                              stride=1, pad_mode='pad', padding=3),nn.BatchNorm2d(channels[0], momentum=BN_MOMENTUM),nn.ReLU())
+        # self.base_layer=Con_norm_act(in_channel=3,out_channel=channels[0],kernel_size=7,stride=1,pad_mode='pad',padding=3,has_bias=False
+        #                              ,BN_MOMENTUM=BN_MOMENTUM)
         self.level0 = self._make_conv_level(
             channels[0], channels[0], levels[0])
         self.level1 = self._make_conv_level(
@@ -143,7 +146,7 @@ class DLA(nn.Cell):
         for i in range(convs):
             modules.append([nn.Conv2d(inplanes, planes, kernel_size=3,
                               stride=stride if i == 0 else 1, pad_mode='pad', padding=dilation,
-                              has_bias=False, dilation=dilation),nn.BatchNorm2d(planes, momentum=BN_MOMENTUM),
+                            dilation=dilation),nn.BatchNorm2d(planes, momentum=BN_MOMENTUM),
                             nn.ReLU()])
             inplanes = planes
         return nn.SequentialCell(*modules)
@@ -154,6 +157,7 @@ class DLA(nn.Cell):
         x = self.base_layer(x)
         for i in range(len(self.channels)):
             x=self.dla_fn[i](x)
+            x = ops.clip_by_value(x, ms.Tensor(1e-4, ms.float32), ms.Tensor(1 - 1e-4, ms.float32))
             y.append(x)
         return y
 
@@ -247,20 +251,20 @@ def get_norm(planes,batchsize, norm_type = 'BN', momentum=0.9):
 
 
 
-class Con_norm_act(nn.Cell):
-    def __init__(self,in_channel,out_channel,kernel_size,stride=1,pad_mode='pad',padding=0,has_bias=False,dilation=1,BN_MOMENTUM=0.9):
-        super(Con_norm_act, self).__init__()
-        self.outc=out_channel
-        self.conv = nn.Conv2d(in_channel, out_channel, kernel_size=kernel_size,
-                               stride=stride, pad_mode=pad_mode, padding=padding,
-                               has_bias=has_bias, dilation=dilation)
-        self.bn = nn.BatchNorm2d(out_channel, momentum=BN_MOMENTUM)
-        self.act = nn.ReLU()
-    def construct(self,x):
-        out=self.conv(x)
-        out1=self.bn(out)
-        out1=self.act(out1)
-        return out1
+# class Con_norm_act(nn.Cell):
+#     def __init__(self,in_channel,out_channel,kernel_size,stride=1,pad_mode='pad',padding=0,has_bias=False,BN_MOMENTUM=0.9):
+#         super(Con_norm_act, self).__init__()
+#         self.outc=out_channel
+#         self.conv = nn.Conv2d(in_channel, out_channel, kernel_size=kernel_size,
+#                                stride=stride, pad_mode=pad_mode, padding=padding,
+#                                has_bias=has_bias)
+#         self.bn = nn.BatchNorm2d(out_channel, momentum=BN_MOMENTUM)
+#         self.act = nn.ReLU()
+#     def construct(self,x):
+#         out=self.conv(x)
+#         out1=self.bn(out)
+#         out1=self.act(out1)
+#         return out1
 
 
 class Root(nn.Cell):
@@ -339,6 +343,7 @@ class IDAUp(nn.Cell):
             upsample = self.ups[i - startp-1]
             project = self.projs[i - startp-1]
             layers[i] = upsample(project(layers[i]))
+            layers[i] = ops.clip_by_value(layers[i], ms.Tensor(-30, ms.float32), ms.Tensor(30, ms.float32))
             node = self.nodes[i - startp-1]
             layers[i] = node(layers[i] + layers[i-1])
         return layers
@@ -354,7 +359,7 @@ def fill_up_weights(up):
             w[:, :, i, j] = (1 - math.fabs(i / f - c)) * (1 - math.fabs(j / f - c))
     for c in range(1, w.shape[0]):
         w[c, 0, :, :] = w[0, 0, :, :]
-    up.weight.set_data(Tensor(w,ms.float32))
+    up.weight.set_data(ms.Tensor(w,ms.float32))
 
 
 # class DeformConv2d(nn.Cell):
@@ -513,13 +518,29 @@ class DeformConv(nn.Cell):
     def __init__(self, chi, cho,BN_MOMENTUM=0.9):
         super(DeformConv, self).__init__()
         self.actf = nn.SequentialCell(
-            # [nn.Conv2d(chi,cho,kernel_size=3,padding=1,pad_mode='pad'),
-             [nn.BatchNorm2d(cho, momentum=BN_MOMENTUM),
+            [nn.Conv2d(chi,cho,kernel_size=3,padding=1,pad_mode='pad'),
+             # [
+            nn.BatchNorm2d(cho, momentum=BN_MOMENTUM),
             nn.ReLU()]
         )
         # self.conv = DCN(chi, cho, kernel_size=(3,3), stride=1, padding=1, dilation=1, deformable_groups=1)
-        self.dcn = DeformConv2d(chi, cho, kernel_size=3, padding=1)
+        # self.dcn = DeformConv2d(chi, cho, kernel_size=3, padding=1)
     def construct(self, x):
-        x = self.dcn(x)
+        # x = self.dcn(x)
         x = self.actf(x)
         return x
+
+
+if __name__ == '__main__':
+    model = DLASeg(BN_MOMENTUM=1,
+                   batchsize=2,
+                   pretrained=False,
+                   down_ratio=4,
+                   last_level=5)
+    x = ms.Tensor(np.ones((2, 3, 384, 1280))).astype(ms.float32)
+    print(x)
+    for i in range(20):
+        output=model(x)
+        model.set_train()
+        ops.print_('features.{}:'.format(i), output)
+        # ops.print_('features.{} nan:'.format(i), ops.nonzero(ops.isnan(output)).shape[0])

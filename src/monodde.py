@@ -44,11 +44,18 @@ class Mono_net(nn.Cell):
         self.print('backbone')
         features = self.backbone(images)
         edge_count=edge_infor[0]
-        edge_indices=edge_infor[-1]
+        edge_indices=edge_infor[1]
         feature_cls, output_cls=self.heads(features)
+        feature_cls = ops.clip_by_value(feature_cls, ms.Tensor(1e-4, ms.float32), ms.Tensor(1 - 1e-4, ms.float32))
+        output_cls = ops.clip_by_value(output_cls, ms.Tensor(1e-4, ms.float32), ms.Tensor(1 - 1e-4, ms.float32))
         prediction = self.predictor(features,feature_cls, output_cls, edge_count,edge_indices)
         # if self.training:
+        ops.print_('hm max:',prediction[0].max())
         hm_loss = self.cls_loss_fnc(prediction[0], targets_heatmap)
+        # if hm_loss>200:
+        #     hm_loss=hm_loss*0.0001
+        hm_loss = ops.clip_by_value(hm_loss,ms.Tensor(0, ms.float32), ms.Tensor(100, ms.float32))
+        ops.print_('hm_loss:',hm_loss)
         reg_loss_out=self.mono_loss(targets_original,targets_select,calibs, prediction[1], iteration)
         reg_loss_out.append(hm_loss)
         return reg_loss_out

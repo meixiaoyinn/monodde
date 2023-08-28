@@ -37,6 +37,7 @@ class Muti_offset_loss(nn.Cell):
             # self.print('trunc_offset_loss:', trunc_offset_loss)
         else:trunc_offset_loss=(self.cast(trunc_mask,self.ms_type)*offset_3D_loss).sum()
         offset_3D_loss = self.weights_offset_loss * self.reducemean(self.gather_nd(offset_3D_loss, trunc_mask_inverse))
+        offset_3D_loss = ops.clip_by_value(offset_3D_loss, clip_value_max=ms.Tensor(800, self.ms_type))
         return offset_3D_loss+trunc_offset_loss
 
 
@@ -85,6 +86,7 @@ class Depth3D_loss(nn.Cell):
                             preds_depth_uncertainty * self.weight
 
         depth_3D_loss = self.reducemean(depth_3D_loss)
+        # depth_3D_loss = ops.clip_by_value(depth_3D_loss, clip_value_max=ms.Tensor(800, self.ms_type))
         return depth_3D_loss
 
 
@@ -131,6 +133,7 @@ class Orien3D_loss(nn.Cell):
 
         loss= cls_losses / self.orien_bin_size + reg_losses / reg_cnt
         orien_3D_loss = self.weight * loss
+        orien_3D_loss = ops.clip_by_value(orien_3D_loss, clip_value_max=ms.Tensor(800, self.ms_type))
         return orien_3D_loss
 
 
@@ -140,12 +143,13 @@ class Dim3D_loss(nn.Cell):
         self.weight_loss=weight_loss
         self.dim_weight=dim_weight
         self.reg_loss_fnc=reg_loss_fnc
+        self.ms_type=ms.float32
 
     def construct(self,pred_dimensions_3D, target_dims_3D):
         dims_3D_loss = self.reg_loss_fnc(pred_dimensions_3D, target_dims_3D) * self.dim_weight
         dims_3D_loss = dims_3D_loss.sum(1)
         dims_3D_loss = self.weight_loss * dims_3D_loss.mean()
-        # dims_3D_loss = ops.clip_by_value(dims_3D_loss, clip_value_max=ms.Tensor(1000, self.ms_type))
+        dims_3D_loss = ops.clip_by_value(dims_3D_loss, clip_value_max=ms.Tensor(800, self.ms_type))
         return dims_3D_loss
 
 
@@ -155,6 +159,7 @@ class Corner3D_loss(nn.Cell):
         self.loss_weights=weight
         self.log=ops.Log()
         self.reg_loss_fnc=reg_loss_fnc
+        self.ms_type=ms.float32
 
     def construct(self, pred_corners_3D,preds_corner_loss_uncern,targets_corners_3D,weight_ramper):
         corner_3D_loss = self.reg_loss_fnc(pred_corners_3D, targets_corners_3D).sum(2)
@@ -163,6 +168,7 @@ class Corner3D_loss(nn.Cell):
         corner_loss_uncern = preds_corner_loss_uncern.squeeze(1)
         corner_3D_loss = corner_3D_loss / corner_loss_uncern + self.log(corner_loss_uncern)
         corner_3D_loss = weight_ramper * self.loss_weights * corner_3D_loss.mean()
+        corner_3D_loss = ops.clip_by_value(corner_3D_loss, clip_value_max=ms.Tensor(800, self.ms_type))
         return corner_3D_loss
 
 
@@ -172,11 +178,13 @@ class Keypoint_loss(nn.Cell):
         self.keypoint_loss_fnc=keypoint_loss_fnc
         self.loss_weights=weight
         self.clip_min=ms.Tensor(1,ms.float32)
+        self.ms_type=ms.float32
 
     def construct(self, preds_keypoints, targets_keypoints,targets_keypoints_mask):
         keypoint_loss = self.keypoint_loss_fnc(preds_keypoints, targets_keypoints).sum(2) * targets_keypoints_mask
         keypoint_loss = keypoint_loss.sum(1)  # Left keypoints_loss shape: (val_objs,)
         keypoint_loss = self.loss_weights * keypoint_loss.sum() / ops.clip_by_value(targets_keypoints_mask.sum(), self.clip_min)
+        keypoint_loss = ops.clip_by_value(keypoint_loss, clip_value_max=ms.Tensor(800, ms.float32))
         return keypoint_loss
 
 
@@ -211,7 +219,6 @@ class Keypoint_depth_loss(nn.Cell):
         valid_keypoint_depth_loss = self.loss_weights * self.reg_loss_fnc(valid_pred_keypoints_depth, target_keypoints_depth_mask)
 
         valid_uncertainty = self.gather_nd(pred_keypoint_depth_uncertainty, keypoints_depth_mask)
-        # self.print('valid_uncertainty:', valid_uncertainty)
         valid_keypoint_depth_loss = valid_keypoint_depth_loss * self.exp(- valid_uncertainty) + self.loss_weights * self.log(valid_uncertainty)
         # average
         valid_keypoint_depth_loss = valid_keypoint_depth_loss.sum() / ops.clip_by_value(self.cast(keypoints_depth_mask_sum, self.ms_type), self.clip_min)
@@ -224,7 +231,7 @@ class Keypoint_depth_loss(nn.Cell):
             invalid_uncertainty = self.gather_nd(pred_keypoint_depth_uncertainty, keypoints_depth_mask_inverse)
             invalid_keypoint_depth_loss = invalid_keypoint_depth_loss * self.exp(- invalid_uncertainty)
             invalid_keypoint_depth_loss = invalid_keypoint_depth_loss.sum() / self.cast(keypoints_depth_mask_inverse_sum, self.ms_type)
-            keypoint_depth_loss = (valid_keypoint_depth_loss + invalid_keypoint_depth_loss)
+            keypoint_depth_loss = valid_keypoint_depth_loss + invalid_keypoint_depth_loss
         else:
             keypoint_depth_loss = valid_keypoint_depth_loss
         return keypoint_depth_loss

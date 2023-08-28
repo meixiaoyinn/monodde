@@ -621,7 +621,7 @@ def create_kitti_dataset(cfg,istrain):
             dataset_column_names = ['img', 'size', 'is_train', 'ori_img', 'P', 'R0', 'C2V', 'c_u', 'c_v', 'f_u', 'f_v',
                                     'b_x', 'b_y', 'input_edge_count', 'input_edge_indices', 'original_idx']
             dataset = ds.GeneratorDataset(kitti_dataset,column_names=dataset_column_names,sampler=distributed_sampler)
-            dataset = dataset.map(operations=normalize_op, input_columns=['img'])
+            dataset = dataset.map(operations=map_op, input_columns=['img'])
             dataset = dataset.batch(images_per_npu, drop_remainder=True)
         datasets.append(dataset)
     if istrain and cfg.is_training:
