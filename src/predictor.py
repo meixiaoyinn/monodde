@@ -277,8 +277,8 @@ class Predictor(nn.Cell):
         # ops.print_('output_cls max:',output_cls.max())
         # output_cls = sigmoid_hm(output_cls)
         output_regs = self.concat(output_regs)
-        # output_regs = ops.sigmoid(output_regs)
-        # output_regs = ops.clip_by_value(output_regs, ms.Tensor(1e-4, ms.float32), ms.Tensor(1 - 1e-4, ms.float32))
+        output_regs = ops.sigmoid(output_regs)
+        output_regs = ops.clip_by_value(output_regs, ms.Tensor(1e-4, ms.float32), ms.Tensor(1 - 1e-4, ms.float32))
         ops.print_('output_reg max:', output_cls.max())
         # output_final=ops.Concat(axis=1)((output_cls,output_regs))
 

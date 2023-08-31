@@ -610,10 +610,11 @@ def create_kitti_dataset(cfg,istrain):
                                     'R0', 'C2V', 'c_u', 'c_v', 'f_u', 'f_v', 'b_x', 'b_y', 'input_edge_count',
                                     'input_edge_indices', 'original_idx']
             dataset = ds.GeneratorDataset(kitti_dataset, column_names=dataset_column_names, sampler=distributed_sampler,
-                                          python_multiprocessing=True, num_parallel_workers=max(4,images_per_npu),shuffle=True)
-            dataset=dataset.map(operations=map_op,input_columns=['img'],num_parallel_workers=max(4,images_per_npu),
+                                          python_multiprocessing=True, num_parallel_workers=min(4,images_per_npu),num_shards=2,
+                                          shuffle=True,shard_id=cfg.rank)
+            dataset=dataset.map(operations=map_op,input_columns=['img'],num_parallel_workers=min(4,images_per_npu),
                                 python_multiprocessing=True)
-            dataset = dataset.batch(images_per_npu, num_parallel_workers=max(4,images_per_npu), drop_remainder=True)
+            dataset = dataset.batch(images_per_npu, num_parallel_workers=min(4,images_per_npu), drop_remainder=True)
         else:
             # img, img.size, self.is_train.astype(np.int32), pad_size, calib['P'], calib['R0'], calib['C2V'], calib[
             #     'c_u'], calib['c_v'], \

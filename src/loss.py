@@ -765,17 +765,7 @@ class Mono_loss(nn.Cell):
             bin_offset=self.atan2(pred_bin_offset[:, 0], pred_bin_offset[:, 1]) + self.alpha_centers[i]
             mask_i=self.cast(mask_i, ms.int32)
             orientations=ops.tensor_scatter_add(orientations, mask_i, bin_offset)
-        # else:
-        #     axis_cls = self.softmax(vector_ori[::, :2])
-        #     axis_cls = axis_cls[:, 0] < axis_cls[::, 1]
-        #     head_cls = self.softmax(vector_ori[::, 2:4])
-        #     head_cls = head_cls[:, 0] < head_cls[:, 1]
-        #     # cls axis
-        #     orientations = self.alpha_centers[axis_cls + head_cls * 2]
-        #     sin_cos_offset = self.l2_norm(vector_ori[::, 4:])
-        #     # bin_ipdates=ops.atan(sin_cos_offset[:, 0] / sin_cos_offset[:, 1])
-        #
-        #     orientations += ops.atan(sin_cos_offset[:, 0] / sin_cos_offset[:, 1])
+
         if locations is not None:  # Compute rays based on 3D locations.
             locations = locations.view(-1, 3)
             rays = self.atan2(locations[:, 0], locations[:, 2])
@@ -845,8 +835,8 @@ class Mono_loss(nn.Cell):
         offset_3D=self.cast(offset_3D,self.ms_type)
         target_centers=self.cast(target_centers,self.ms_type)
 
-        for idx, gt_idx in enumerate(ops.unique(batch_idxs)[0]):
-            corr_idx = self.nonzero(batch_idxs == gt_idx)
+        for idx, gt_idx in enumerate(ops.unique(batch_idxs)[0].asnumpy().tolist()):
+            corr_idx = self.nonzero((batch_idxs == gt_idx))
             centers=self.gather_nd(target_centers,corr_idx)
             offset_3D_select = self.gather_nd(offset_3D, corr_idx)
             corr_idx=self.cast(corr_idx,ms.int32)
@@ -871,192 +861,194 @@ class Mono_loss(nn.Cell):
         pred_keypoint_offset = pred_keypoint_offset.reshape((total_num_objs, -1, 2))  # It could be 8 or 10 keypoints.
         pred_keypoints = ops.expand_dims(target_centers,1) + pred_keypoint_offset  # pred_keypoints shape: (total_num_objs, keypoint_num, 2)
 
-        for idx, gt_idx in enumerate(ops.unique(ops.cast(batch_idxs, ms.int32))[0]):
-            corr_idx = self.cast(self.nonzero(batch_idxs == gt_idx).squeeze(-1), ms.int32)
-            pred_keypoints[corr_idx] = pred_keypoints[corr_idx] * self.down_ratio - pad_size[idx]
+        for idx, gt_idx in enumerate(ops.unique(ops.cast(batch_idxs, ms.int32))[0].asnumpy().tolist()):
+            corr_idx = self.cast(self.nonzero(batch_idxs == gt_idx), ms.int32)
+            pred_keypoints_i=self.gather_nd(pred_keypoints,corr_idx)
+            corr_idx=corr_idx.squeeze(1)
+            pred_keypoints[corr_idx] = pred_keypoints_i * self.down_ratio - pad_size[idx]
 
         return pred_keypoints
 
-    def decode_from_GRM(self, pred_rotys, pred_dimensions, pred_keypoint_offset, pred_direct_depths, targets_dict,
-                        GRM_uncern=None, GRM_valid_items=None,
-                        batch_idxs=None, cfg=None):
-        '''
-        Description:
-            Compute the 3D locations based on geometric constraints.
-        Input:
-            pred_rotys: The predicted global orientation. shape: (total_num_objs, 1)
-            pred_dimensions: The predicted dimensions. shape: (num_objs, 3)
-            pred_keypoint_offset: The offset of keypoints related to target centers on the feature maps. shape: (total_num_obs, 20)
-            pred_direct_depths: The directly estimated depth of targets. shape: (total_num_objs, 1)
-            targets_dict: The dictionary that contains somre required information. It must contains the following 4 items:
-                targets_dict['target_centers']: Target centers. shape: (valid_objs, 2)
-                targets_dict['offset_3D']: The offset from target centers to 3D centers. shape: (valid_objs, 2)
-                targets_dict['pad_size']: The pad size for the original image. shape: (B, 2)
-                targets_dict['calib']: A list contains calibration objects. Its length is B.
-            GRM_uncern: The estimated uncertainty of 25 equations in GRM. shape: None or (total_num_objs, 25).
-            GRM_valid_items: The effectiveness of 25 equations. shape: None or (total_num_objs, 25)
-            batch_idxs: The batch index of various objects. shape: None or (total_num_objs,)
-            cfg: The config object. It could be None.
-        Output:
-            pinv: The decoded positions of targets. shape: (total_num_objs, 3)
-            A: Matrix A of geometric constraints. shape: (total_num_objs, 25, 3)
-            B: Matrix B of geometric constraints. shape: (total_num_objs, 25, 1)
-        '''
-        target_centers = targets_dict['target_centers']  # The position of target centers on heatmap. shape: (total_num_objs, 2)
-        offset_3D = targets_dict['offset_3D']  # shape: (total_num_objs, 2)
-        calibs = [targets_dict['calib']]  # The list contains calibration objects. Its length is B.
-        pad_size = targets_dict['pad_size']  # shape: (B, 2)
-
-        if GRM_uncern is None:
-            GRM_uncern = self.ones((pred_rotys.shape[0], 25), self.ms_type)
-
-        if len(calibs) == 1:  # Batch size is 1.
-            batch_idxs = self.ones((pred_rotys.shape[0],), ms.uint8)
-
-        if GRM_valid_items is None:  # All equations of GRM is valid.
-            GRM_valid_items = self.ones((pred_rotys.shape[0], 25), ms.bool_)
-
-        # For debug
-        '''pred_keypoint_offset = targets_dict['keypoint_offset'][:, :, 0:2].contiguous().view(-1, 20)
-        pred_rotys = targets_dict['rotys'].view(-1, 1)
-        pred_dimensions = targets_dict['dimensions']
-        locations = targets_dict['locations']
-        pred_direct_depths = locations[:, 2].view(-1, 1)'''
-
-        pred_keypoints = self.decode_2D_keypoints(target_centers, pred_keypoint_offset,
-                                                  targets_dict['pad_size'],
-                                                  batch_idxs=batch_idxs)  # pred_keypoints: The 10 keypoint position original image. shape: (total_num_objs, 10, 2)
-
-        c_u = self.stack_0([calib['c_u'] for calib in calibs])  # c_u shape: (B,)
-        c_v = self.stack_0([calib['c_v'] for calib in calibs])
-        f_u = self.stack_0([calib['f_u'] for calib in calibs])
-        f_v = self.stack_0([calib['f_v'] for calib in calibs])
-        b_x = self.stack_0([calib['b_x'] for calib in calibs])
-        b_y = self.stack_0([calib['b_y'] for calib in calibs])
-
-        n_pred_keypoints = pred_keypoints  # n_pred_keypoints shape: (total_num_objs, 10, 2)
-
-        for idx, gt_idx in enumerate(ops.unique(ops.cast(batch_idxs, ms.int32))[0].asnumpy().tolist()):
-            # corr_idx = ops.nonzero(batch_idxs == gt_idx).squeeze(-1).astype(ms.float64)
-            corr_idx = self.cast(self.nonzero(batch_idxs == gt_idx).squeeze(1),ms.int32)
-            n_pred_keypoints[corr_idx][ :, 0] = (n_pred_keypoints[corr_idx][ :, 0] - c_u[idx]) / f_u[idx]
-            n_pred_keypoints[corr_idx][ :, 1] = (n_pred_keypoints[corr_idx][ :, 1] - c_v[idx]) / f_v[idx]
-
-        total_num_objs = n_pred_keypoints.shape[0]
-
-        centers_3D = self.decode_3D_centers(target_centers, offset_3D, pad_size, batch_idxs)  # centers_3D: The positions of 3D centers of objects projected on original image.
-        n_centers_3D = centers_3D
-        for idx, gt_idx in enumerate(ops.Unique()(ops.cast(batch_idxs, ms.int32))[0].asnumpy().tolist()):
-            corr_idx = self.cast(self.nonzero(batch_idxs == gt_idx).squeeze(1),ms.int32)
-            n_centers_3D[corr_idx][ :,0] = (n_centers_3D[corr_idx][ :,0] - c_u[idx]) / f_u[idx]  # n_centers_3D shape: (total_num_objs, 2)
-            n_centers_3D[corr_idx][ :,1] = (n_centers_3D[corr_idx][ :,1] - c_v[idx]) / f_v[idx]
-
-        kp_group = ops.concat([(ops.Reshape(n_pred_keypoints, (total_num_objs, 20)), n_centers_3D,
-                             self.zeros((total_num_objs, 2), self.ms_type))],axis=1)  # kp_group shape: (total_num_objs, 24)
-        coe = self.zeros((total_num_objs, 24, 2), self.ms_type)
-        coe[:, 0:: 2, 0] = -1
-        coe[:, 1:: 2, 1] = -1
-        A = ops.concat((coe, ops.expand_dims(kp_group, 2)), axis=2)
-        coz = self.zeros((total_num_objs, 1, 3), self.ms_type)
-        coz[:, :, 2] = 1
-        A = ops.concat((A, coz), axis=1)  # A shape: (total_num_objs, 25, 3)
-
-        pred_rotys = pred_rotys.reshape(total_num_objs, 1)
-        cos = ops.cos(pred_rotys)  # cos shape: (total_num_objs, 1)
-        sin = ops.sin(pred_rotys)  # sin shape: (total_num_objs, 1)
-
-        pred_dimensions = pred_dimensions.reshape(total_num_objs, 3)
-        l = pred_dimensions[:, 0: 1]  # h shape: (total_num_objs, 1). The same as w and l.
-        h = pred_dimensions[:, 1: 2]
-        w = pred_dimensions[:, 2: 3]
-
-        B = self.zeros((total_num_objs, 25, 1), self.ms_type)
-        B[:, 0, :] = l / 2 * cos + w / 2 * sin
-        B[:, 2, :] = l / 2 * cos - w / 2 * sin
-        B[:, 4, :] = -l / 2 * cos - w / 2 * sin
-        B[:, 6, :] = -l / 2 * cos + w / 2 * sin
-        B[:, 8, :] = l / 2 * cos + w / 2 * sin
-        B[:, 10, :] = l / 2 * cos - w / 2 * sin
-        B[:, 12, :] = -l / 2 * cos - w / 2 * sin
-        B[:, 14, :] = -l / 2 * cos + w / 2 * sin
-        B[:, 1: 8: 2, :] = ops.expand_dims((h / 2), 1)
-        B[:, 9: 16: 2, :] = -ops.expand_dims((h / 2), 1)
-        B[:, 17, :] = h / 2
-        B[:, 19, :] = -h / 2
-
-        total_num_objs = n_pred_keypoints.shape[0]
-        pred_direct_depths = pred_direct_depths.reshape(total_num_objs, )
-        for idx, gt_idx in enumerate(ops.unique(self.cast(batch_idxs,ms.int32))[0]):
-            corr_idx = self.cast(ops.nonzero(batch_idxs == gt_idx).squeeze(-1),ms.int32)
-            B[corr_idx][ 22, 0] = -(centers_3D[corr_idx][ 0] - c_u[idx]) * pred_direct_depths[corr_idx] / f_u[idx] - b_x[idx]
-            B[corr_idx][ 23, 0] = -(centers_3D[corr_idx][ 1] - c_v[idx]) * pred_direct_depths[corr_idx] / f_v[idx] - b_y[idx]
-            B[corr_idx][ 24, 0] = pred_direct_depths[corr_idx]
-
-        C = self.zeros((total_num_objs, 25, 1), self.ms_type)
-        kps = n_pred_keypoints.view(total_num_objs, 20)  # kps_x shape: (total_num_objs, 20)
-        C[:, 0, :] = kps[:, 0: 1] * (-l / 2 * sin + w / 2 * cos)
-        C[:, 1, :] = kps[:, 1: 2] * (-l / 2 * sin + w / 2 * cos)
-        C[:, 2, :] = kps[:, 2: 3] * (-l / 2 * sin - w / 2 * cos)
-        C[:, 3, :] = kps[:, 3: 4] * (-l / 2 * sin - w / 2 * cos)
-        C[:, 4, :] = kps[:, 4: 5] * (l / 2 * sin - w / 2 * cos)
-        C[:, 5, :] = kps[:, 5: 6] * (l / 2 * sin - w / 2 * cos)
-        C[:, 6, :] = kps[:, 6: 7] * (l / 2 * sin + w / 2 * cos)
-        C[:, 7, :] = kps[:, 7: 8] * (l / 2 * sin + w / 2 * cos)
-        C[:, 8, :] = kps[:, 8: 9] * (-l / 2 * sin + w / 2 * cos)
-        C[:, 9, :] = kps[:, 9: 10] * (-l / 2 * sin + w / 2 * cos)
-        C[:, 10, :] = kps[:, 10: 11] * (-l / 2 * sin - w / 2 * cos)
-        C[:, 11, :] = kps[:, 11: 12] * (-l / 2 * sin - w / 2 * cos)
-        C[:, 12, :] = kps[:, 12: 13] * (l / 2 * sin - w / 2 * cos)
-        C[:, 13, :] = kps[:, 13: 14] * (l / 2 * sin - w / 2 * cos)
-        C[:, 14, :] = kps[:, 14: 15] * (l / 2 * sin + w / 2 * cos)
-        C[:, 15, :] = kps[:, 15: 16] * (l / 2 * sin + w / 2 * cos)
-
-        B = B - C  # B shape: (total_num_objs, 25, 1)
-
-        # A = A[:, 22:25, :]
-        # B = B[:, 22:25, :]
-
-        weights = 1 / GRM_uncern  # weights shape: (total_num_objs, 25)
-
-        ##############  Block the invalid equations ##############
-        # A = A * GRM_valid_items.unsqueeze(2)
-        # B = B * GRM_valid_items.unsqueeze(2)
-
-        ##############  Solve pinv for Coordinate loss ##############
-        A_coor = A
-        B_coor = B
-        if cfg is not None and not cfg.MODEL.COOR_ATTRIBUTE:  # Do not use Coordinate loss to train attributes.
-            A_coor = A_coor.asnumpy()
-            B_coor = B_coor.asnumpy()
-
-        weights_coor = weights
-        if cfg is not None and not cfg.MODEL.COOR_UNCERN:  # Do not use Coordinate loss to train uncertainty.
-            weights_coor = weights_coor.asnumpy()
-
-        A_coor = A_coor * ops.expand_dims(weights_coor, 2)
-        B_coor = B_coor * ops.expand_dims(weights_coor, 2)
-
-        AT_coor = ops.transpose(A_coor, (0, 2, 1))  # A shape: (total_num_objs, 25, 3)
-        pinv = ops.bmm(AT_coor, A_coor)
-        pinv = ops.inverse(pinv)
-        pinv = ops.bmm(pinv, AT_coor)
-        pinv = ops.bmm(pinv, B_coor)
-
-        ##############  Solve A_uncern and B_uncern for GRM loss ##############
-        A_uncern = A
-        B_uncern = B
-        if cfg is not None and not cfg.MODEL.GRM_ATTRIBUTE:  # Do not use GRM loss to train attributes.
-            A_uncern = A_uncern.asnumpy()  # .detach()
-            B_uncern = B_uncern.asnumpy()  # .detach()
-
-        weights_uncern = weights
-        if cfg is not None and not cfg.MODEL.GRM_UNCERN:  # Do not use GRM loss to train uncertainty.
-            weights_uncern = weights_uncern.asnumpy()  # .detach()
-
-        A_uncern = A_uncern * ops.expand_dims(weights_uncern, 2)
-        B_uncern = B_uncern * ops.expand_dims(weights_uncern, 2)
-
-        return pinv.view(-1, 3), A_uncern, B_uncern
+    # def decode_from_GRM(self, pred_rotys, pred_dimensions, pred_keypoint_offset, pred_direct_depths, targets_dict,
+    #                     GRM_uncern=None, GRM_valid_items=None,
+    #                     batch_idxs=None, cfg=None):
+    #     '''
+    #     Description:
+    #         Compute the 3D locations based on geometric constraints.
+    #     Input:
+    #         pred_rotys: The predicted global orientation. shape: (total_num_objs, 1)
+    #         pred_dimensions: The predicted dimensions. shape: (num_objs, 3)
+    #         pred_keypoint_offset: The offset of keypoints related to target centers on the feature maps. shape: (total_num_obs, 20)
+    #         pred_direct_depths: The directly estimated depth of targets. shape: (total_num_objs, 1)
+    #         targets_dict: The dictionary that contains somre required information. It must contains the following 4 items:
+    #             targets_dict['target_centers']: Target centers. shape: (valid_objs, 2)
+    #             targets_dict['offset_3D']: The offset from target centers to 3D centers. shape: (valid_objs, 2)
+    #             targets_dict['pad_size']: The pad size for the original image. shape: (B, 2)
+    #             targets_dict['calib']: A list contains calibration objects. Its length is B.
+    #         GRM_uncern: The estimated uncertainty of 25 equations in GRM. shape: None or (total_num_objs, 25).
+    #         GRM_valid_items: The effectiveness of 25 equations. shape: None or (total_num_objs, 25)
+    #         batch_idxs: The batch index of various objects. shape: None or (total_num_objs,)
+    #         cfg: The config object. It could be None.
+    #     Output:
+    #         pinv: The decoded positions of targets. shape: (total_num_objs, 3)
+    #         A: Matrix A of geometric constraints. shape: (total_num_objs, 25, 3)
+    #         B: Matrix B of geometric constraints. shape: (total_num_objs, 25, 1)
+    #     '''
+    #     target_centers = targets_dict['target_centers']  # The position of target centers on heatmap. shape: (total_num_objs, 2)
+    #     offset_3D = targets_dict['offset_3D']  # shape: (total_num_objs, 2)
+    #     calibs = [targets_dict['calib']]  # The list contains calibration objects. Its length is B.
+    #     pad_size = targets_dict['pad_size']  # shape: (B, 2)
+    #
+    #     if GRM_uncern is None:
+    #         GRM_uncern = self.ones((pred_rotys.shape[0], 25), self.ms_type)
+    #
+    #     if len(calibs) == 1:  # Batch size is 1.
+    #         batch_idxs = self.ones((pred_rotys.shape[0],), ms.uint8)
+    #
+    #     if GRM_valid_items is None:  # All equations of GRM is valid.
+    #         GRM_valid_items = self.ones((pred_rotys.shape[0], 25), ms.bool_)
+    #
+    #     # For debug
+    #     '''pred_keypoint_offset = targets_dict['keypoint_offset'][:, :, 0:2].contiguous().view(-1, 20)
+    #     pred_rotys = targets_dict['rotys'].view(-1, 1)
+    #     pred_dimensions = targets_dict['dimensions']
+    #     locations = targets_dict['locations']
+    #     pred_direct_depths = locations[:, 2].view(-1, 1)'''
+    #
+    #     pred_keypoints = self.decode_2D_keypoints(target_centers, pred_keypoint_offset,
+    #                                               targets_dict['pad_size'],
+    #                                               batch_idxs=batch_idxs)  # pred_keypoints: The 10 keypoint position original image. shape: (total_num_objs, 10, 2)
+    #
+    #     c_u = self.stack_0([calib['c_u'] for calib in calibs])  # c_u shape: (B,)
+    #     c_v = self.stack_0([calib['c_v'] for calib in calibs])
+    #     f_u = self.stack_0([calib['f_u'] for calib in calibs])
+    #     f_v = self.stack_0([calib['f_v'] for calib in calibs])
+    #     b_x = self.stack_0([calib['b_x'] for calib in calibs])
+    #     b_y = self.stack_0([calib['b_y'] for calib in calibs])
+    #
+    #     n_pred_keypoints = pred_keypoints  # n_pred_keypoints shape: (total_num_objs, 10, 2)
+    #
+    #     for idx, gt_idx in enumerate(ops.unique(ops.cast(batch_idxs, ms.int32))[0].asnumpy().tolist()):
+    #         # corr_idx = ops.nonzero(batch_idxs == gt_idx).squeeze(-1).astype(ms.float64)
+    #         corr_idx = self.cast(self.nonzero(batch_idxs == gt_idx).squeeze(1),ms.int32)
+    #         n_pred_keypoints[corr_idx][ :, 0] = (n_pred_keypoints[corr_idx][ :, 0] - c_u[idx]) / f_u[idx]
+    #         n_pred_keypoints[corr_idx][ :, 1] = (n_pred_keypoints[corr_idx][ :, 1] - c_v[idx]) / f_v[idx]
+    #
+    #     total_num_objs = n_pred_keypoints.shape[0]
+    #
+    #     centers_3D = self.decode_3D_centers(target_centers, offset_3D, pad_size, batch_idxs)  # centers_3D: The positions of 3D centers of objects projected on original image.
+    #     n_centers_3D = centers_3D
+    #     for idx, gt_idx in enumerate(ops.Unique()(ops.cast(batch_idxs, ms.int32))[0].asnumpy().tolist()):
+    #         corr_idx = self.cast(self.nonzero(batch_idxs == gt_idx).squeeze(1),ms.int32)
+    #         n_centers_3D[corr_idx][ :,0] = (n_centers_3D[corr_idx][ :,0] - c_u[idx]) / f_u[idx]  # n_centers_3D shape: (total_num_objs, 2)
+    #         n_centers_3D[corr_idx][ :,1] = (n_centers_3D[corr_idx][ :,1] - c_v[idx]) / f_v[idx]
+    #
+    #     kp_group = ops.concat([(ops.Reshape(n_pred_keypoints, (total_num_objs, 20)), n_centers_3D,
+    #                          self.zeros((total_num_objs, 2), self.ms_type))],axis=1)  # kp_group shape: (total_num_objs, 24)
+    #     coe = self.zeros((total_num_objs, 24, 2), self.ms_type)
+    #     coe[:, 0:: 2, 0] = -1
+    #     coe[:, 1:: 2, 1] = -1
+    #     A = ops.concat((coe, ops.expand_dims(kp_group, 2)), axis=2)
+    #     coz = self.zeros((total_num_objs, 1, 3), self.ms_type)
+    #     coz[:, :, 2] = 1
+    #     A = ops.concat((A, coz), axis=1)  # A shape: (total_num_objs, 25, 3)
+    #
+    #     pred_rotys = pred_rotys.reshape(total_num_objs, 1)
+    #     cos = ops.cos(pred_rotys)  # cos shape: (total_num_objs, 1)
+    #     sin = ops.sin(pred_rotys)  # sin shape: (total_num_objs, 1)
+    #
+    #     pred_dimensions = pred_dimensions.reshape(total_num_objs, 3)
+    #     l = pred_dimensions[:, 0: 1]  # h shape: (total_num_objs, 1). The same as w and l.
+    #     h = pred_dimensions[:, 1: 2]
+    #     w = pred_dimensions[:, 2: 3]
+    #
+    #     B = self.zeros((total_num_objs, 25, 1), self.ms_type)
+    #     B[:, 0, :] = l / 2 * cos + w / 2 * sin
+    #     B[:, 2, :] = l / 2 * cos - w / 2 * sin
+    #     B[:, 4, :] = -l / 2 * cos - w / 2 * sin
+    #     B[:, 6, :] = -l / 2 * cos + w / 2 * sin
+    #     B[:, 8, :] = l / 2 * cos + w / 2 * sin
+    #     B[:, 10, :] = l / 2 * cos - w / 2 * sin
+    #     B[:, 12, :] = -l / 2 * cos - w / 2 * sin
+    #     B[:, 14, :] = -l / 2 * cos + w / 2 * sin
+    #     B[:, 1: 8: 2, :] = ops.expand_dims((h / 2), 1)
+    #     B[:, 9: 16: 2, :] = -ops.expand_dims((h / 2), 1)
+    #     B[:, 17, :] = h / 2
+    #     B[:, 19, :] = -h / 2
+    #
+    #     total_num_objs = n_pred_keypoints.shape[0]
+    #     pred_direct_depths = pred_direct_depths.reshape(total_num_objs, )
+    #     for idx, gt_idx in enumerate(ops.unique(self.cast(batch_idxs,ms.int32))[0]):
+    #         corr_idx = self.cast(ops.nonzero(batch_idxs == gt_idx).squeeze(-1),ms.int32)
+    #         B[corr_idx][ 22, 0] = -(centers_3D[corr_idx][ 0] - c_u[idx]) * pred_direct_depths[corr_idx] / f_u[idx] - b_x[idx]
+    #         B[corr_idx][ 23, 0] = -(centers_3D[corr_idx][ 1] - c_v[idx]) * pred_direct_depths[corr_idx] / f_v[idx] - b_y[idx]
+    #         B[corr_idx][ 24, 0] = pred_direct_depths[corr_idx]
+    #
+    #     C = self.zeros((total_num_objs, 25, 1), self.ms_type)
+    #     kps = n_pred_keypoints.view(total_num_objs, 20)  # kps_x shape: (total_num_objs, 20)
+    #     C[:, 0, :] = kps[:, 0: 1] * (-l / 2 * sin + w / 2 * cos)
+    #     C[:, 1, :] = kps[:, 1: 2] * (-l / 2 * sin + w / 2 * cos)
+    #     C[:, 2, :] = kps[:, 2: 3] * (-l / 2 * sin - w / 2 * cos)
+    #     C[:, 3, :] = kps[:, 3: 4] * (-l / 2 * sin - w / 2 * cos)
+    #     C[:, 4, :] = kps[:, 4: 5] * (l / 2 * sin - w / 2 * cos)
+    #     C[:, 5, :] = kps[:, 5: 6] * (l / 2 * sin - w / 2 * cos)
+    #     C[:, 6, :] = kps[:, 6: 7] * (l / 2 * sin + w / 2 * cos)
+    #     C[:, 7, :] = kps[:, 7: 8] * (l / 2 * sin + w / 2 * cos)
+    #     C[:, 8, :] = kps[:, 8: 9] * (-l / 2 * sin + w / 2 * cos)
+    #     C[:, 9, :] = kps[:, 9: 10] * (-l / 2 * sin + w / 2 * cos)
+    #     C[:, 10, :] = kps[:, 10: 11] * (-l / 2 * sin - w / 2 * cos)
+    #     C[:, 11, :] = kps[:, 11: 12] * (-l / 2 * sin - w / 2 * cos)
+    #     C[:, 12, :] = kps[:, 12: 13] * (l / 2 * sin - w / 2 * cos)
+    #     C[:, 13, :] = kps[:, 13: 14] * (l / 2 * sin - w / 2 * cos)
+    #     C[:, 14, :] = kps[:, 14: 15] * (l / 2 * sin + w / 2 * cos)
+    #     C[:, 15, :] = kps[:, 15: 16] * (l / 2 * sin + w / 2 * cos)
+    #
+    #     B = B - C  # B shape: (total_num_objs, 25, 1)
+    #
+    #     # A = A[:, 22:25, :]
+    #     # B = B[:, 22:25, :]
+    #
+    #     weights = 1 / GRM_uncern  # weights shape: (total_num_objs, 25)
+    #
+    #     ##############  Block the invalid equations ##############
+    #     # A = A * GRM_valid_items.unsqueeze(2)
+    #     # B = B * GRM_valid_items.unsqueeze(2)
+    #
+    #     ##############  Solve pinv for Coordinate loss ##############
+    #     A_coor = A
+    #     B_coor = B
+    #     if cfg is not None and not cfg.MODEL.COOR_ATTRIBUTE:  # Do not use Coordinate loss to train attributes.
+    #         A_coor = A_coor.asnumpy()
+    #         B_coor = B_coor.asnumpy()
+    #
+    #     weights_coor = weights
+    #     if cfg is not None and not cfg.MODEL.COOR_UNCERN:  # Do not use Coordinate loss to train uncertainty.
+    #         weights_coor = weights_coor.asnumpy()
+    #
+    #     A_coor = A_coor * ops.expand_dims(weights_coor, 2)
+    #     B_coor = B_coor * ops.expand_dims(weights_coor, 2)
+    #
+    #     AT_coor = ops.transpose(A_coor, (0, 2, 1))  # A shape: (total_num_objs, 25, 3)
+    #     pinv = ops.bmm(AT_coor, A_coor)
+    #     pinv = ops.inverse(pinv)
+    #     pinv = ops.bmm(pinv, AT_coor)
+    #     pinv = ops.bmm(pinv, B_coor)
+    #
+    #     ##############  Solve A_uncern and B_uncern for GRM loss ##############
+    #     A_uncern = A
+    #     B_uncern = B
+    #     if cfg is not None and not cfg.MODEL.GRM_ATTRIBUTE:  # Do not use GRM loss to train attributes.
+    #         A_uncern = A_uncern.asnumpy()  # .detach()
+    #         B_uncern = B_uncern.asnumpy()  # .detach()
+    #
+    #     weights_uncern = weights
+    #     if cfg is not None and not cfg.MODEL.GRM_UNCERN:  # Do not use GRM loss to train uncertainty.
+    #         weights_uncern = weights_uncern.asnumpy()  # .detach()
+    #
+    #     A_uncern = A_uncern * ops.expand_dims(weights_uncern, 2)
+    #     B_uncern = B_uncern * ops.expand_dims(weights_uncern, 2)
+    #
+    #     return pinv.view(-1, 3), A_uncern, B_uncern
 
     def decode_from_SoftGRM(self, pred_rotys, pred_dimensions, pred_keypoint_offset, pred_combined_depth,
                             targets_dict, GRM_uncern=None, GRM_valid_items=None,

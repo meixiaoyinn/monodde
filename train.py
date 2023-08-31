@@ -2,6 +2,8 @@
 #
 # import mindspore as ms
 # import mindspore.nn as nn
+import random
+
 import mindspore.communication as comm
 # from mindspore import amp
 # from mindspore.amp import init_status, all_finite
@@ -179,18 +181,30 @@ class TrainOneStepCell(nn.TrainOneStepWithLossScaleCell):
         return loss
 
 
+def set_seed(seed=42, rank=0):
+    """
+    seed: seed int
+    rank: rank id
+    """
+    if rank is None:
+        rank = 0
+    random.seed(seed + rank)
+    ms.set_seed(seed + rank)
+    np.random.seed(seed + rank)
+
 def train_preprocess():
     cfg=setup(config)
     if cfg.MODEL.DEVICE=='Ascend':
         device_id = get_device_id()
-        ms.set_context(mode=ms.PYNATIVE_MODE, device_target=cfg.MODEL.DEVICE, device_id=device_id,pynative_synchronize=True)  #pynative_synchronize=True,save_graphs=True,save_graphs_path='output/graph'
-        ms.set_context(enable_compile_cache=True, compile_cache_path="output/my_compile_cache")
+        ms.set_context(mode=ms.PYNATIVE_MODE,pynative_synchronize=True)  #pynative_synchronize=True,save_graphs=True,save_graphs_path='output/graph'
+        # ms.set_context(enable_compile_cache=True, compile_cache_path="output/my_compile_cache")
         # ms.set_context(mode=ms.GRAPH_MODE, device_target=cfg.MODEL.DEVICE, device_id=device_id,print_file_path='log.data')
         # ms.set_context(save_graphs=True, save_graphs_path="output/graph")
     else:
-        ms.context.set_context(mode=ms.PYNATIVE_MODE, device_target=cfg.MODEL.DEVICE, device_id=0)
+        ms.context.set_context(mode=ms.PYNATIVE_MODE)
     device=ms.get_context("device_target")
     cfg=init_distribute()  # init distributed
+    set_seed(cfg.SEED)
     return cfg
 
 
@@ -262,7 +276,7 @@ def train():
 
     iter_per_epoch=cfg.SOLVER.IMS_PER_BATCH
 
-    # summary_collect_frequency = 1
+    summary_collect_frequency = 1
 
     # Define forward function
     def forward_fn(images, edge_infor, targets_heatmap, targets_original,targets_select,calibs,iteration):
@@ -280,7 +294,7 @@ def train():
     def train_step(images, edge_infor, targets_heatmap, targets_original,targets_select,calibs,iteration):
         (loss,_), grads = grad_fn(images, edge_infor, targets_heatmap, targets_original,targets_select,calibs,iteration)
         # if loss.asnumpy() != float("inf") and loss.asnumpy() <10000:
-        # loss = ops.depend(loss, opt(grads))
+        loss = ops.depend(loss, opt(grads))
         return loss
 
     # with ms.SummaryRecord('./summary_dir/summary_04', network=network) as summary_record:

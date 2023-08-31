@@ -140,7 +140,7 @@ def default_argument_parser():
     parser.add_argument('--GRM_Uncern', action="store_true", help="Whether to use GRM loss to train uncertainty.")
 
     parser.add_argument("--num_gpus", type=int, default=1, help="number of gpu")
-    parser.add_argument("--seed", type=int, default=-1, help="For not fixing seed, set it as -1.")
+    parser.add_argument("--seed", type=int, default=42, help="For not fixing seed, set it as -1.")
     parser.add_argument("--batch_size", type=int, default=8, help="number of batch_size")
     parser.add_argument("--num_work", type=int, default=8, help="number of workers for dataloader")
     parser.add_argument("--output", type=str, default=None)
